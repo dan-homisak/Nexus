@@ -1,0 +1,67 @@
+:root { --bg:#0e0f12; --bg2:#12141a; --card:#12141a; --border:#252938; --text:#e6e6e6; --muted:#aab3c7; --accent:#2a334a; --ok:#3da57a; --warn:#d09d3d; --err:#d05c5c; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:var(--bg); color:var(--text); }
+header, footer { padding: 12px 16px; background:#151821; border-bottom:1px solid var(--border); }
+header h1 { margin: 0 0 8px 0; font-size: 18px; }
+.toolbar { display:flex; gap:8px; align-items:center; }
+.toolbar input { max-width: 220px; }
+
+nav { display:flex; gap:8px; padding:8px 16px; border-bottom:1px solid var(--border); background:#12141a; position:sticky; top:0; z-index:10; }
+nav button, button { background:#1d2230; color:var(--text); border:1px solid #2b3347; border-radius:8px; padding:8px 10px; cursor:pointer; transition:transform .04s ease; }
+nav button:active, button:active { transform: translateY(1px); }
+nav button.active { background:#2a334a; }
+
+#content { padding: 16px; }
+.card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:12px; }
+.card h3 { margin: 0 0 8px; font-size: 16px; color:#d7dbea; }
+
+.table { width:100%; border-collapse: collapse; font-size:14px; }
+.table th, .table td { border-bottom:1px solid var(--border); padding:8px; vertical-align: top; }
+.table th { text-align:left; color:#b9c0d0; }
+
+.input, select, textarea { background:#0e0f12; color:var(--text); border:1px solid #2b3347; border-radius:6px; padding:6px; width:100%; }
+.row { display:grid; grid-template-columns: repeat(6, 1fr); gap:8px; }
+.row.two { grid-template-columns: repeat(2, 1fr); }
+.row.three { grid-template-columns: repeat(3, 1fr); }
+.row.four { grid-template-columns: repeat(4, 1fr); }
+.field { display:flex; flex-direction:column; gap:4px; }
+.field label { font-size:12px; color:#aab3c7; display:flex; align-items:center; gap:6px; }
+.field .required::after { content:"*"; color:var(--warn); margin-left:4px; }
+
+.badge { font-size:12px; padding:2px 6px; border:1px solid #2b3347; border-radius:999px; color:#c9d1e1; }
+.badge.req { border-color:#5a4b25; background:#2b2111; color:#e9c27a; }
+.badge.tip { border-color:#3a4b5e; background:#17212c; }
+
+.info { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; font-size:11px; line-height:16px; color:#cfe0ff; border:1px solid #3a4b5e; background:#17212c; cursor:help; position:relative; }
+.info::after {
+  content: attr(data-tip);
+  position:absolute; left:50%; transform:translateX(-50%) translateY(-6px);
+  bottom:22px; white-space:pre-wrap; pointer-events:none;
+  background:#0e0f12; border:1px solid #334056; color:#e6eefb;
+  border-radius:8px; padding:8px 10px; width:280px; max-width:60vw; opacity:0; transition:opacity .12s ease, transform .12s ease;
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  z-index: 20;
+}
+.info:hover::after { opacity:1; transform:translateX(-50%) translateY(-2px); }
+
+.section { border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:12px; background:#111319; }
+.section > .title { font-size:13px; color:#b7c0d4; margin-bottom:8px; display:flex; align-items:center; gap:8px; }
+.section .title .hint { color:#93a1bc; font-size:12px; }
+
+.help-box { background:#101520; border:1px dashed #2b3347; border-radius:10px; padding:10px; color:#cfd6e6; }
+.help-box h4 { margin:0 0 6px; font-size:13px; color:#e0e6f5; }
+.help-box p { margin:4px 0; color:#bfc9dc; font-size:13px; }
+.help-box code { background:#0c0f15; border:1px solid #2b3347; padding:0 4px; border-radius:4px; }
+
+.invalid { outline:1px solid var(--err); }
+button[disabled] { opacity:.6; cursor:not-allowed; }
+
+.tree { padding-left: 16px; }
+.badge.stat { border-radius:6px; padding:2px 6px; font-weight:600; }
+.stat-green { background:#122317; border:1px solid #2a5f3b; color:#88d3a9; }
+.stat-yellow { background:#2b2411; border:1px solid #6b5822; color:#e9c27a; }
+.stat-red { background:#2a1213; border:1px solid #7a2e33; color:#f2a2a7; }
+.progress { height:8px; background:#0c0f15; border:1px solid #2b3347; border-radius:6px; overflow:hidden; }
+.progress > div { height:100%; background:#2a5f3b; }
+.progress.warn > div { background:#6b5822; }
+.progress.err > div { background:#7a2e33; }

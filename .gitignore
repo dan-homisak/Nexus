@@ -1,0 +1,32 @@
+# --- Python cache / build ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- IDE/editor cruft ---
+.vscode/
+.idea/
+
+# --- OS cruft ---
+.DS_Store
+
+# --- Logs / local data ---
+*.log
+*.sqlite3
+*.db
+
+# --- Environment / secrets ---
+.env
+.env.* 
+
+# --- Project-specific ignores ---
+data/
+cartracker.db
