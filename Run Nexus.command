@@ -5,15 +5,17 @@ cd "$(dirname "$0")"
 # Set a custom port if you want, e.g.:
 # export NEXUS_PORT=8088
 
-if [ ! -d ".venv" ]; then
-  /usr/bin/env python3 -m venv .venv
-fi
-source .venv/bin/activate
+VENV_DIR=".venv"
+PYTHON_BIN="$VENV_DIR/bin/python"
 
-if ! python -c "import fastapi, uvicorn, sqlalchemy, pydantic, pandas" 2>/dev/null; then
-  python -m pip install --upgrade pip
-  pip install -r requirements.txt
+if [ ! -x "$PYTHON_BIN" ]; then
+  /usr/bin/env python3 -m venv "$VENV_DIR"
 fi
 
-python run_app.py
+# Use the venv interpreter directly so renaming the project directory keeps working.
+if ! "$PYTHON_BIN" -c "import fastapi, uvicorn, sqlalchemy, pydantic, pandas" 2>/dev/null; then
+  "$PYTHON_BIN" -m pip install --upgrade pip
+  "$PYTHON_BIN" -m pip install -r requirements.txt
+fi
 
+"$PYTHON_BIN" run_app.py
