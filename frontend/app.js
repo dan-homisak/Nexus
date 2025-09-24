@@ -83,17 +83,17 @@
             delete body.id;
   
             const ALLOW = {
-              '/api/cars': ['name','fiscal_year','owner'],
+              '/api/portfolios': ['name','fiscal_year','owner'],
               '/api/project-groups': ['code','name','description'],
-              '/api/projects': ['car_id','name','group_id','code','line'],
+              '/api/projects': ['portfolio_id','name','group_id','code','line'],
               '/api/categories': ['name','parent_id','project_id'],
               '/api/vendors': ['name'],
-              '/api/entries': ['date','kind','amount','description','car_id','project_id','category_id','vendor_id','po_number','quote_ref','mischarged','intended_car_id']
+              '/api/entries': ['date','kind','amount','description','portfolio_id','project_id','category_id','vendor_id','po_number','quote_ref','mischarged','intended_portfolio_id']
             };
             const allowed = ALLOW[base];
             if (allowed) Object.keys(body).forEach(k => { if (!allowed.includes(k)) delete body[k]; });
   
-            ['car_id','project_id','group_id','parent_id','category_id','vendor_id','intended_car_id'].forEach(k=>{
+            ['portfolio_id','project_id','group_id','parent_id','category_id','vendor_id','intended_portfolio_id'].forEach(k=>{
               if (k in body) body[k] = (body[k]===''? null : Number(body[k]));
             });
             if ('amount' in body) body.amount = body.amount===''? null : Number(body.amount);
@@ -115,24 +115,24 @@
         };
   
         // ---------- Renderers ----------
-        async function renderCars(){
-          const cars = await apiList('/api/cars');
+        async function renderPortfolios(){
+          const portfolios = await apiList('/api/portfolios');
           content.innerHTML =
-            card('Add CAR', `
+            card('Add Portfolio', `
               <div class="row">
                 ${field('name', labelFor('name','Name', 'e.g., "FY25 CapEx – Line EX6".'), input('name','FY25 CapEx'))}
                 ${field('fiscal_year', labelFor('fiscal_year','Fiscal Year', 'Optional: FY25 or 2025.'), input('fiscal_year','FY25'))}
                 ${field('owner', labelFor('owner','Owner', 'Approver/owner.'), input('owner','Dan'))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All CARs', table(cars, ['id','name','fiscal_year','owner'], '/api/cars'));
+            + card('All Portfolios', table(portfolios, ['id','name','fiscal_year','owner'], '/api/portfolios'));
   
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
             const [name, fiscal_year, owner] = [...content.querySelectorAll('input')].map(i=>i.value);
             if(!name) return alert('Name required');
-            await apiCreate('/api/cars', {name, fiscal_year, owner});
-            renderCars();
+            await apiCreate('/api/portfolios', {name, fiscal_year, owner});
+            renderPortfolios();
           };
         }
   
@@ -141,7 +141,7 @@
           content.innerHTML =
             card('Add Project Group', `
               <div class="row">
-                ${field('code', labelFor('code','Code', 'Short code shared across CARs. e.g., "COBRA".'), input('code','COBRA'))}
+                ${field('code', labelFor('code','Code', 'Short code shared across portfolios. e.g., "COBRA".'), input('code','COBRA'))}
                 ${field('name', labelFor('name','Name', 'Program name (rollup label).'), input('name','Cobra Program'))}
                 ${field('description', labelFor('description','Description','What counts as this program.'), `<textarea class="input" name="description" rows="1" placeholder="Optional"></textarea>`)}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
@@ -159,28 +159,28 @@
         }
   
         async function renderProjects(){
-          const [cars, pgs, projects] = await Promise.all([
-            apiList('/api/cars'), apiList('/api/project-groups'), apiList('/api/projects')
+          const [portfolios, pgs, projects] = await Promise.all([
+            apiList('/api/portfolios'), apiList('/api/project-groups'), apiList('/api/projects')
           ]);
-          const carOpts = cars.map(c=>({value:c.id, label:`${c.name}${c.fiscal_year ? ' • FY '+c.fiscal_year : ''}`}));
+          const portfolioOpts = portfolios.map(p=>({value:p.id, label:`${p.name}${p.fiscal_year ? ' • FY '+p.fiscal_year : ''}`}));
           const pgOpts = [{value:'', label:'(none)'}].concat(pgs.map(pg=>({value:pg.id, label:`${pg.code?pg.code+' – ':''}${pg.name}`})));
-  
+
           content.innerHTML =
             card('Add Project', `
               <div class="row">
-                ${field('car_id', labelFor('car_id','CAR', 'This project lives inside a single CAR.'), select('car_id', carOpts))}
-                ${field('name', labelFor('name','Project Name', 'Per-CAR project name (duplicates allowed across CARs).'), input('name','Cobra'))}
-                ${field('group_id', labelFor('group_id','Project Group', 'Set to roll up "same" projects across CARs.'), select('group_id', pgOpts))}
+                ${field('portfolio_id', labelFor('portfolio_id','Portfolio', 'Each project belongs to a single portfolio.'), select('portfolio_id', portfolioOpts))}
+                ${field('name', labelFor('name','Project Name', 'Per-portfolio project name (duplicates allowed across portfolios).'), input('name','Cobra'))}
+                ${field('group_id', labelFor('group_id','Project Group', 'Use to roll up similar projects across portfolios.'), select('group_id', pgOpts))}
                 ${field('code', labelFor('code','Project Code (optional)','Internal alias'), input('code','COBRA-PM1'))}
                 ${field('line', labelFor('line','Line/Asset (optional)','e.g., EX6'), input('line','EX6'))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All Projects', table(projects, ['id','car_id','name','group_id','code','line'], '/api/projects'));
-  
+            + card('All Projects', table(projects, ['id','portfolio_id','name','group_id','code','line'], '/api/projects'));
+
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
             const body = {
-              car_id: Number(content.querySelector('select[name=car_id]').value),
+              portfolio_id: Number(content.querySelector('select[name=portfolio_id]').value),
               name: content.querySelector('input[name=name]').value,
               group_id: content.querySelector('select[name=group_id]').value ? Number(content.querySelector('select[name=group_id]').value) : null,
               code: content.querySelector('input[name=code]').value || null,
@@ -195,7 +195,7 @@
         async function renderCategories(){
           const [projects, categories] = await Promise.all([apiList('/api/projects'), apiList('/api/categories')]);
           const projOpts = [{value:'', label:'(Global)'}].concat(projects.map(p=>({
-            value: p.id, label: `Project #${p.id} — ${p.name} [CAR ${p.car_id}]`
+            value: p.id, label: `Project #${p.id} — ${p.name} [Portfolio ${p.portfolio_id}]`
           })));
           const catOpts = [{value:'', label:'(No parent)'}].concat(categories.map(c=>({value:c.id, label:`#${c.id} — ${c.name}`})));
   
@@ -246,11 +246,11 @@
   
         // ---- Kind help ----
         const KIND_HELP = {
-          budget: { title:'Budget', text:`Sets the planned target (limit) for a category/project/CAR.`, required:['amount','car_id'] },
-          quote: { title:'Quote', text:`Vendor quotation (not a PO). Use to compare pricing; does not affect actuals.`, required:['amount','car_id','vendor_id','quote_ref'] },
-          po: { title:'PO', text:`Issued/committed spend with a PO number. Counts toward actuals.`, required:['amount','car_id','po_number'] },
-          unplanned: { title:'Unplanned', text:`Actual spend not originally budgeted. Counts toward actuals.`, required:['amount','car_id'] },
-          adjustment: { title:'Adjustment', text:`Manual correction (+/-). Affects actuals. Use negative for credits.`, required:['amount','car_id'] },
+          budget: { title:'Budget', text:`Sets the planned target (limit) for a category/project/portfolio.`, required:['amount','portfolio_id'] },
+          quote: { title:'Quote', text:`Vendor quotation (not a PO). Use to compare pricing; does not affect actuals.`, required:['amount','portfolio_id','vendor_id','quote_ref'] },
+          po: { title:'PO', text:`Issued/committed spend with a PO number. Counts toward actuals.`, required:['amount','portfolio_id','po_number'] },
+          unplanned: { title:'Unplanned', text:`Actual spend not originally budgeted. Counts toward actuals.`, required:['amount','portfolio_id'] },
+          adjustment: { title:'Adjustment', text:`Manual correction (+/-). Affects actuals. Use negative for credits.`, required:['amount','portfolio_id'] },
         };
         const helpBox = (k='budget')=>{
           const o = KIND_HELP[k];
@@ -263,20 +263,20 @@
   
         // ---- Entries ----
         async function renderEntries(){
-          const [cars, projects, categories, vendors, entries] = await Promise.all([
-            apiList('/api/cars'), apiList('/api/projects'), apiList('/api/categories'), apiList('/api/vendors'), apiList('/api/entries')
+          const [portfolios, projects, categories, vendors, entries] = await Promise.all([
+            apiList('/api/portfolios'), apiList('/api/projects'), apiList('/api/categories'), apiList('/api/vendors'), apiList('/api/entries')
           ]);
-          const carMap = mapBy(cars);
-          const carOpts = cars.map(c=>({value:c.id,label:`${c.name}${c.fiscal_year ? ' • FY '+c.fiscal_year : ''}`}));
+          const portfolioMap = mapBy(portfolios);
+          const portfolioOpts = portfolios.map(p=>({value:p.id,label:`${p.name}${p.fiscal_year ? ' • FY '+p.fiscal_year : ''}`}));
           const projOpts = projects.map(p=>{
-            const car = carMap[p.car_id];
-            const carLabel = car ? `${car.name}${car.fiscal_year ? ' • FY '+car.fiscal_year : ''}` : `CAR ${p.car_id}`;
-            return {value:p.id, label:`[${carLabel}] ${p.name}`};
+            const portfolio = portfolioMap[p.portfolio_id];
+            const portfolioLabel = portfolio ? `${portfolio.name}${portfolio.fiscal_year ? ' • FY '+portfolio.fiscal_year : ''}` : `Portfolio ${p.portfolio_id}`;
+            return {value:p.id, label:`[${portfolioLabel}] ${p.name}`};
           });
           const catMap = mapBy(categories);
           const catOpts = categories.map(c=>({value:c.id, label:`${catPath(c, catMap)}${c.project_id ? ` (Project ${c.project_id})` : ''}`}));
           const vendorOpts = vendors.map(v=>({value:v.id,label:v.name}));
-  
+
           content.innerHTML =
             card('Add Entry', `
               <div class="row two">
@@ -295,16 +295,16 @@
                       ${field('amount', labelFor('amount','Amount','Positive number; negative for adjustment credits.'), input('amount','1000'))}
                     </div>
                   </div>
-  
+
                   <div class="section">
                     <div class="title">Scope</div>
                     <div class="row three">
-                      ${field('car_id', labelFor('car_id','CAR','Primary CAR charged.'), select('car_id', carOpts))}
-                      ${field('project_id', labelFor('project_id','Project','Per-CAR project (groups roll up across CARs).'), select('project_id', projOpts))}
+                      ${field('portfolio_id', labelFor('portfolio_id','Portfolio','Primary portfolio charged.'), select('portfolio_id', portfolioOpts))}
+                      ${field('project_id', labelFor('project_id','Project','Per-portfolio project (groups roll up across portfolios).'), select('project_id', projOpts))}
                       ${field('category_id', labelFor('category_id','Category (n-level)','Pick most specific leaf.'), select('category_id', catOpts))}
                     </div>
                   </div>
-  
+
                   <div class="section">
                     <div class="title">Commercial</div>
                     <div class="row three">
@@ -313,18 +313,18 @@
                       ${field('po_number', labelFor('po_number','PO #','For POs.'), input('po_number','4500123456'))}
                     </div>
                   </div>
-  
+
                   <div class="section">
-                    <div class="title">Wrong CAR? <span class="hint">(flag to fix later)</span></div>
+                    <div class="title">Wrong Portfolio? <span class="hint">(flag to fix later)</span></div>
                     <div class="row two">
                       <div class="field">
-                        ${labelFor('mischarged','Mark as mischarged','Check to flag this entry as charged to the wrong CAR.')}
+                        ${labelFor('mischarged','Mark as mischarged','Check to flag this entry as charged to the wrong portfolio.')}
                         <input type="checkbox" name="mischarged"/>
                       </div>
-                      ${field('intended_car_id', labelFor('intended_car_id','Intended CAR','Where it *should* be charged. Used in Ideal scenario.'), select('intended_car_id', [{value:'',label:'(none)'}].concat(carOpts)))}
+                      ${field('intended_portfolio_id', labelFor('intended_portfolio_id','Intended Portfolio','Where it *should* be charged. Used in Ideal scenario.'), select('intended_portfolio_id', [{value:'',label:'(none)'}].concat(portfolioOpts)))}
                     </div>
                   </div>
-  
+
                   <div class="section">
                     <div class="title">Notes & Tags</div>
                     <div class="row two">
@@ -332,51 +332,51 @@
                       ${field('tags', labelFor('tags','Tags','Comma-separated (e.g., "long-lead, priority").'), input('tags','long-lead, priority'))}
                     </div>
                   </div>
-  
+
                   <div class="section">
-                    <div class="title">Allocations <span class="hint">(optional)</span> <span class="info" data-tip="Split the amount across multiple CARs. Sum must equal Amount.">i</span></div>
+                    <div class="title">Allocations <span class="hint">(optional)</span> <span class="info" data-tip="Split the amount across multiple portfolios. Sum must equal Amount.">i</span></div>
                     <div id="allocs"></div>
                     <button id="addAlloc">+ Allocation</button>
                   </div>
-  
+
                   <div class="section">
                     <button id="addEntry">Add Entry</button>
                   </div>
                 </div>
-  
+
                 <div>${helpBox('budget')}</div>
               </div>
             `)
             + card('All Entries', table(entries, [
-              'id','date','kind','amount','car_id','project_id','category_id','vendor_id','po_number','quote_ref','mischarged','intended_car_id','description'
+              'id','date','kind','amount','portfolio_id','project_id','category_id','vendor_id','po_number','quote_ref','mischarged','intended_portfolio_id','description'
             ], '/api/entries'));
-  
-          // Show/Hide intended CAR when mischarged checked
+
+          // Show/Hide intended portfolio when mischarged checked
           const misBox = content.querySelector('input[name=mischarged]');
-          const intendedSel = content.querySelector('select[name=intended_car_id]');
+          const intendedSel = content.querySelector('select[name=intended_portfolio_id]');
           if (misBox && intendedSel) {
             const sync = () => { intendedSel.parentElement.parentElement.style.display = misBox.checked ? '' : 'none'; };
             sync(); misBox.addEventListener('change', sync);
           }
-  
+
           const allocsDiv = document.getElementById('allocs');
           const addAlloc = document.getElementById('addAlloc');
           if (addAlloc) addAlloc.onclick = () => {
             allocsDiv.insertAdjacentHTML('beforeend', `
               <div class="row four" data-row="1" style="margin-bottom:6px">
-                ${field('alloc_car', labelFor('alloc_car','Alloc CAR','CAR receiving part of this amount.'), select('alloc_car', carOpts))}
-                ${field('alloc_amount', labelFor('alloc_amount','Amount','Portion to this CAR.'), input('alloc_amount',''))}
+                ${field('alloc_portfolio', labelFor('alloc_portfolio','Alloc Portfolio','Portfolio receiving part of this amount.'), select('alloc_portfolio', portfolioOpts))}
+                ${field('alloc_amount', labelFor('alloc_amount','Amount','Portion to this portfolio.'), input('alloc_amount',''))}
                 <div class="field"><label>&nbsp;</label><button onclick="this.closest('[data-row]').remove()">Remove</button></div>
               </div>`);
           };
-  
+
           const kindSel = content.querySelector('select[name=kind]');
           const markRequired = () => {
             const k = KIND_HELP[kindSel.value];
             const box = document.getElementById('kindHelp');
             if (box) box.outerHTML = helpBox(kindSel.value);
             content.querySelectorAll('.required').forEach(el=>el.classList.remove('required'));
-            ['amount','car_id','vendor_id','quote_ref','po_number'].forEach(n=>{
+            ['amount','portfolio_id','vendor_id','quote_ref','po_number'].forEach(n=>{
               const el = content.querySelector(`[for="${n}"]`);
               if (el) el.classList.remove('required');
             });
@@ -387,7 +387,7 @@
           };
           if (kindSel) kindSel.onchange = markRequired;
           markRequired();
-  
+
           const addBtn = document.getElementById('addEntry');
           if (addBtn) addBtn.onclick = async ()=>{
             try {
@@ -398,7 +398,7 @@
                 return el.value === '' ? null : el.value;
               };
               const allocations = [...allocsDiv.querySelectorAll('[data-row]')].map(div => ({
-                car_id: Number(div.querySelector('select[name=alloc_car]').value),
+                portfolio_id: Number(div.querySelector('select[name=alloc_portfolio]').value),
                 amount: Number(div.querySelector('input[name=alloc_amount]').value)
               }));
   
@@ -407,14 +407,14 @@
                 kind: String(get('kind') || 'budget'),
                 amount: Number(get('amount')),
                 description: get('description'),
-                car_id: get('car_id') ? Number(get('car_id')) : null,
+                portfolio_id: get('portfolio_id') ? Number(get('portfolio_id')) : null,
                 project_id: get('project_id') ? Number(get('project_id')) : null,
                 category_id: get('category_id') ? Number(get('category_id')) : null,
                 vendor_id: get('vendor_id') ? Number(get('vendor_id')) : null,
                 po_number: get('po_number'),
                 quote_ref: get('quote_ref'),
                 mischarged: get('mischarged') || false,
-                intended_car_id: get('intended_car_id') ? Number(get('intended_car_id')) : null,
+                intended_portfolio_id: get('intended_portfolio_id') ? Number(get('intended_portfolio_id')) : null,
                 allocations: allocations.length? allocations : null,
                 tags: (get('tags')||'').split(',').map(s=>s.trim()).filter(Boolean) || null
               };
@@ -430,8 +430,8 @@
                 alert(`Missing required fields for kind="${body.kind}": ${missing.join(', ')}`);
                 return;
               }
-              if (body.mischarged && !body.intended_car_id) {
-                alert('Please choose the intended CAR for a mischarged entry.');
+              if (body.mischarged && !body.intended_portfolio_id) {
+                alert('Please choose the intended portfolio for a mischarged entry.');
                 return;
               }
               if (body.allocations && body.allocations.length){
@@ -451,8 +451,8 @@
         // ---- Pivots & Health ----
         let chartInstance;
         async function renderPivots(){
-          const [cars, categories] = await Promise.all([apiList('/api/cars'), apiList('/api/categories')]);
-          const carOpts = [{value:'',label:'(All CARs)'}].concat(cars.map(c=>({value:c.id,label:`${c.name}${c.fiscal_year ? ' • FY '+c.fiscal_year : ''}`})));
+          const [portfolios, categories] = await Promise.all([apiList('/api/portfolios'), apiList('/api/categories')]);
+          const portfolioOpts = [{value:'',label:'(All Portfolios)'}].concat(portfolios.map(c=>({value:c.id,label:`${c.name}${c.fiscal_year ? ' • FY '+c.fiscal_year : ''}`})));
           const catMap = mapBy(categories);
   
           const ui = document.createElement('div');
@@ -461,7 +461,7 @@
               <h3>Pivot & Health</h3>
               <div class="row three">
                 <div class="field">
-                  ${labelFor('scenario','Scenario','Actual = as charged today; Ideal = re-map mischarged entries to Intended CAR.')}
+                  ${labelFor('scenario','Scenario','Actual = as charged today; Ideal = re-map mischarged entries to intended portfolios.')}
                   <select name="scenario">
                     <option value="actual">Actual</option>
                     <option value="ideal">Ideal</option>
@@ -470,8 +470,8 @@
                 <div class="field">
                   ${labelFor('by','Pivot By','Choose grouping for the pivot table below.')}
                   <select name="by">
-                    <option value="">Detailed (car+project+category+vendor+kind)</option>
-                    <option value="car">By CAR</option>
+                    <option value="">Detailed (portfolio+project+category+vendor+kind)</option>
+                    <option value="portfolio">By Portfolio</option>
                     <option value="project">By Project</option>
                     <option value="group">By Project Group</option>
                     <option value="category">By Category</option>
@@ -480,8 +480,8 @@
                   </select>
                 </div>
                 <div class="field">
-                  ${labelFor('carFilter','CAR (for Category Health)','Pick a CAR to see category-level health.')}
-                  ${select('carFilter', carOpts)}
+                  ${labelFor('portfolioFilter','Portfolio (for Category Health)','Pick a portfolio to see category-level health.')}
+                  ${select('portfolioFilter', portfolioOpts)}
                 </div>
               </div>
             </div>
@@ -495,7 +495,7 @@
             try {
               const scenario = content.querySelector('select[name=scenario]').value || 'actual';
               const by = content.querySelector('select[name=by]').value;
-              const carFilter = content.querySelector('select[name=carFilter]').value;
+              const portfolioFilter = content.querySelector('select[name=portfolioFilter]').value;
   
               // Pivot
               const rows = await apiList(`/api/pivot/summary${by ? '?by=' + by : ''}${by ? '&' : '?'}scenario=${scenario}`);
@@ -513,32 +513,32 @@
               if(chartInstance) chartInstance.destroy();
               chartInstance = new Chart(ctx, { type: 'bar', data: { labels, datasets: [{ label: 'Totals', data }] }, options: { responsive:true } });
   
-              // Health by CAR
-              const healthCar = await apiList(`/api/status/health?level=car&scenario=${scenario}`);
-              const carRows = healthCar.map(h => {
-                const car = cars.find(c=>c.id === (h.car_id ?? h.eff_car_id));
-                const name = car ? `${car.name}${car.fiscal_year? ' • FY '+car.fiscal_year:''}` : (h.car_id ?? h.eff_car_id);
+              // Health by portfolio
+              const healthPortfolio = await apiList(`/api/status/health?level=portfolio&scenario=${scenario}`);
+              const portfolioRows = healthPortfolio.map(h => {
+                const portfolio = portfolios.find(p=>p.id === h.portfolio_id);
+                const name = portfolio ? `${portfolio.name}${portfolio.fiscal_year? ' • FY '+portfolio.fiscal_year:''}` : h.portfolio_id;
                 return { name, budget: h.budget || 0, actual: h.actual || 0, variance: (h.actual||0)-(h.budget||0), variance_pct: h.variance_pct ?? null, status: h.status };
               });
-              const carTable = table(carRows, ['name','budget','actual','variance','variance_pct','status']);
-              // Health by Category (if chosen CAR)
-              let catTable = '<div class="card"><em>Select a CAR above to see category health.</em></div>';
-              if (carFilter) {
-                const healthCat = await apiList(`/api/status/health?level=category&car_id=${carFilter}&scenario=${scenario}`);
+              const portfolioTable = table(portfolioRows, ['name','budget','actual','variance','variance_pct','status']);
+              // Health by Category (if chosen Portfolio)
+              let catTable = '<div class="card"><em>Select a portfolio above to see category health.</em></div>';
+              if (portfolioFilter) {
+                const healthCat = await apiList(`/api/status/health?level=category&portfolio_id=${portfolioFilter}&scenario=${scenario}`);
                 const catRows = healthCat.map(h => {
                   const path = catMap[h.category_id] ? catPath(catMap[h.category_id], catMap) : '(none)';
                   return { category: path, budget: h.budget||0, actual: h.actual||0, variance: (h.actual||0)-(h.budget||0), variance_pct: h.variance_pct ?? null, status: h.status };
                 });
                 catTable = table(catRows, ['category','budget','actual','variance','variance_pct','status']);
-                catTable = card('Health — By Category (selected CAR)', catTable);
+                catTable = card('Health — By Category (selected portfolio)', catTable);
               }
-              document.getElementById('health').innerHTML = card('Health — By CAR', carTable) + catTable;
+              document.getElementById('health').innerHTML = card('Health — By Portfolio', portfolioTable) + catTable;
             } catch (e) { showError(e); }
           }
   
           content.querySelector('select[name=scenario]').onchange = draw;
           content.querySelector('select[name=by]').onchange = draw;
-          content.querySelector('select[name=carFilter]').onchange = draw;
+          content.querySelector('select[name=portfolioFilter]').onchange = draw;
           draw();
         }
   
@@ -565,7 +565,7 @@
           const active = document.querySelector('nav button.active');
           const tab = active && active.dataset.tab;
           try {
-            if(tab==='cars') return renderCars();
+            if(tab==='portfolios') return renderPortfolios();
             if(tab==='project_groups') return renderProjectGroups();
             if(tab==='projects') return renderProjects();
             if(tab==='categories') return renderCategories();

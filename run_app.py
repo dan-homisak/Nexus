@@ -1,7 +1,7 @@
 # run_app.py
 import threading, time, webbrowser, uvicorn, os
 
-PORT = int(os.environ.get("CAR_TRACKER_PORT", "8000"))
+PORT = int(os.environ.get("NEXUS_PORT", "8000"))
 URL  = f"http://127.0.0.1:{PORT}/?autoshutdown=1"   # query flag enables auto-quit on tab close
 
 def _open_browser():

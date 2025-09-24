@@ -55,27 +55,27 @@ def save_snapshot(db: Session = Depends(get_db)):
 def ping():
     return {"ok": True}
 
-# --- Cars ---
-@app.get("/api/cars")
-def list_cars(db: Session = Depends(get_db)):
-    return db.execute(select(models.Car)).scalars().all()
+# --- Portfolios ---
+@app.get("/api/portfolios")
+def list_portfolios(db: Session = Depends(get_db)):
+    return db.execute(select(models.Portfolio)).scalars().all()
 
-@app.post("/api/cars")
-def create_car(car: schemas.CarIn, db: Session = Depends(get_db)):
-    m = models.Car(**car.model_dump())
+@app.post("/api/portfolios")
+def create_portfolio(portfolio: schemas.PortfolioIn, db: Session = Depends(get_db)):
+    m = models.Portfolio(**portfolio.model_dump())
     db.add(m); db.commit(); db.refresh(m)
     return m
 
-@app.put("/api/cars/{car_id}")
-def update_car(car_id: int, car: schemas.CarIn, db: Session = Depends(get_db)):
-    m = get_or_404(db, models.Car, car_id)
-    for k, v in car.model_dump().items(): setattr(m, k, v)
+@app.put("/api/portfolios/{portfolio_id}")
+def update_portfolio(portfolio_id: int, portfolio: schemas.PortfolioIn, db: Session = Depends(get_db)):
+    m = get_or_404(db, models.Portfolio, portfolio_id)
+    for k, v in portfolio.model_dump().items(): setattr(m, k, v)
     db.commit(); db.refresh(m)
     return m
 
-@app.delete("/api/cars/{car_id}")
-def delete_car(car_id: int, db: Session = Depends(get_db)):
-    m = get_or_404(db, models.Car, car_id)
+@app.delete("/api/portfolios/{portfolio_id}")
+def delete_portfolio(portfolio_id: int, db: Session = Depends(get_db)):
+    m = get_or_404(db, models.Portfolio, portfolio_id)
     db.delete(m); db.commit()
     return {"ok": True}
 
@@ -213,7 +213,7 @@ def create_entry(e: schemas.EntryIn, db: Session = Depends(get_db)):
     if e.allocations:
         total = 0.0
         for a in e.allocations:
-            db.add(models.Allocation(entry_id=m.id, car_id=a.car_id, amount=a.amount))
+            db.add(models.Allocation(entry_id=m.id, portfolio_id=a.portfolio_id, amount=a.amount))
             total += a.amount
         if abs(total - e.amount) > 1e-6:
             raise HTTPException(400, "Allocations must sum to entry amount")
@@ -251,7 +251,7 @@ def update_entry(eid: int, e: schemas.EntryIn, db: Session = Depends(get_db)):
     if e.allocations:
         total = 0.0
         for a in e.allocations:
-            db.add(models.Allocation(entry_id=eid, car_id=a.car_id, amount=a.amount))
+            db.add(models.Allocation(entry_id=eid, portfolio_id=a.portfolio_id, amount=a.amount))
             total += a.amount
         if abs(total - e.amount) > 1e-6:
             raise HTTPException(400, "Allocations must sum to entry amount")
@@ -319,7 +319,7 @@ def delete_project_group(pg_id: int, db: Session = Depends(get_db)):
 def pivot_summary(
     by: str | None = None,
     scenario: str = "actual",  # actual | ideal
-    car_id: int | None = None,
+    portfolio_id: int | None = None,
     project_id: int | None = None,
     group_id: int | None = None,
     category_id: int | None = None,
@@ -327,16 +327,16 @@ def pivot_summary(
     kind: str | None = None,
     db: Session = Depends(get_db)
 ):
-    eff_car = case(
-        (and_(models.Entry.mischarged == True, models.Entry.intended_car_id.is_not(None)), models.Entry.intended_car_id),
-        else_=models.Entry.car_id
+    eff_portfolio = case(
+        (and_(models.Entry.mischarged == True, models.Entry.intended_portfolio_id.is_not(None)), models.Entry.intended_portfolio_id),
+        else_=models.Entry.portfolio_id
     )
 
-    # choose car column based on scenario
-    car_col = eff_car if scenario == "ideal" else models.Entry.car_id
+    # choose portfolio column based on scenario
+    portfolio_col = eff_portfolio if scenario == "ideal" else models.Entry.portfolio_id
 
     base_cols = [
-        car_col.label("car_id"),
+        portfolio_col.label("portfolio_id"),
         models.Entry.project_id,
         models.Entry.category_id,
         models.Entry.vendor_id,
@@ -350,10 +350,10 @@ def pivot_summary(
         stmt = stmt.join(models.Project, models.Project.id == models.Entry.project_id, isouter=True)
         stmt = stmt.add_columns(models.Project.group_id)
 
-    # filters (respect scenario for car_id)
+    # filters (respect scenario for portfolio_id)
     conds = []
-    if car_id is not None:
-        conds.append(car_col == car_id)
+    if portfolio_id is not None:
+        conds.append(portfolio_col == portfolio_id)
     if project_id is not None:
         conds.append(models.Entry.project_id == project_id)
     if category_id is not None:
@@ -367,8 +367,8 @@ def pivot_summary(
     if conds: stmt = stmt.where(and_(*conds))
 
     # group by
-    if by == "car":
-        stmt = stmt.group_by(car_col)
+    if by == "portfolio":
+        stmt = stmt.group_by(portfolio_col)
     elif by == "project":
         stmt = stmt.group_by(models.Entry.project_id)
     elif by == "group":
@@ -380,16 +380,16 @@ def pivot_summary(
     elif by == "kind":
         stmt = stmt.group_by(models.Entry.kind)
     else:
-        stmt = stmt.group_by(car_col, models.Entry.project_id, models.Entry.category_id, models.Entry.vendor_id, models.Entry.kind)
+        stmt = stmt.group_by(portfolio_col, models.Entry.project_id, models.Entry.category_id, models.Entry.vendor_id, models.Entry.kind)
 
     rows = db.execute(stmt).all()
     return [dict(r._mapping) for r in rows]
 
 @app.get("/api/status/health")
 def health(
-    level: str,                     # 'car' or 'category'
+    level: str,                     # 'portfolio' or 'category'
     scenario: str = "actual",       # 'actual' or 'ideal'
-    car_id: int | None = None,      # required for level='category'
+    portfolio_id: int | None = None,      # required for level='category'
     db: Session = Depends(get_db)
 ):
     """
@@ -399,47 +399,47 @@ def health(
       - red: overrun > 10%  (or budget==0 and actual>0)
     'actual' kinds: po, unplanned, adjustment
     """
-    if level not in {"car", "category"}:
-        raise HTTPException(400, "level must be 'car' or 'category'")
+    if level not in {"portfolio", "category"}:
+        raise HTTPException(400, "level must be 'portfolio' or 'category'")
 
-    eff_car = case(
-        (and_(models.Entry.mischarged == True, models.Entry.intended_car_id.is_not(None)), models.Entry.intended_car_id),
-        else_=models.Entry.car_id
+    eff_portfolio = case(
+        (and_(models.Entry.mischarged == True, models.Entry.intended_portfolio_id.is_not(None)), models.Entry.intended_portfolio_id),
+        else_=models.Entry.portfolio_id
     )
-    car_col = eff_car if scenario == "ideal" else models.Entry.car_id
+    portfolio_col = eff_portfolio if scenario == "ideal" else models.Entry.portfolio_id
 
-    keys = [car_col.label("car_id")] if level == "car" else [car_col.label("car_id"), models.Entry.category_id]
+    keys = [portfolio_col.label("portfolio_id")] if level == "portfolio" else [portfolio_col.label("portfolio_id"), models.Entry.category_id]
     if level == "category":
-        if car_id is None:
-            raise HTTPException(400, "car_id required when level='category' ")
+        if portfolio_id is None:
+            raise HTTPException(400, "portfolio_id required when level='category' ")
     # budget
     bq = select(*keys, func.sum(models.Entry.amount).label("budget")).where(models.Entry.kind == "budget")
-    if level == "category": bq = bq.where(car_col == car_id)
+    if level == "category": bq = bq.where(portfolio_col == portfolio_id)
     bq = bq.group_by(*keys)
     b_rows = db.execute(bq).all()
 
     # actual
     actual_kinds = ("po", "unplanned", "adjustment")
     aq = select(*keys, func.sum(models.Entry.amount).label("actual")).where(models.Entry.kind.in_(actual_kinds))
-    if level == "category": aq = aq.where(car_col == car_id)
+    if level == "category": aq = aq.where(portfolio_col == portfolio_id)
     aq = aq.group_by(*keys)
     a_rows = db.execute(aq).all()
 
     # merge in Python
     def key_of(row):
-        if level == "car":
-          return (row._mapping["car_id"],)
-        return (row._mapping["car_id"], row._mapping["category_id"])
+        if level == "portfolio":
+            return (row._mapping["portfolio_id"],)
+        return (row._mapping["portfolio_id"], row._mapping["category_id"])
 
     agg = {}
     for r in b_rows:
         k = key_of(r)
-        agg[k] = {"car_id": r._mapping["car_id"], "budget": r._mapping["budget"]}
+        agg[k] = {"portfolio_id": r._mapping["portfolio_id"], "budget": r._mapping["budget"]}
         if level == "category": agg[k]["category_id"] = r._mapping["category_id"]
     for r in a_rows:
         k = key_of(r)
         if k not in agg:
-            agg[k] = {"car_id": r._mapping["car_id"], "budget": 0.0}
+            agg[k] = {"portfolio_id": r._mapping["portfolio_id"], "budget": 0.0}
             if level == "category": agg[k]["category_id"] = r._mapping["category_id"]
         agg[k]["actual"] = r._mapping["actual"]
 

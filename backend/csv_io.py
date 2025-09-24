@@ -11,7 +11,7 @@ def export_to_csv(db: Session):
         df = pd.read_sql(db.query(model).statement, db.bind)
         df.to_csv(outdir / fname, index=False)
 
-    dump(models.Car, "cars.csv")
+    dump(models.Portfolio, "portfolios.csv")
     dump(models.ProjectGroup, "project_groups.csv")
     dump(models.Project, "projects.csv")
     dump(models.Category, "categories.csv")
@@ -32,7 +32,7 @@ def import_latest_csv(db: Session):
         p = indir / name
         return pd.read_csv(p) if p.exists() else pd.DataFrame()
 
-    cars = maybe_read("cars.csv")
+    portfolios = maybe_read("portfolios.csv")
     pgs = maybe_read("project_groups.csv")
     projects = maybe_read("projects.csv")
     cats = maybe_read("categories.csv")
@@ -43,8 +43,8 @@ def import_latest_csv(db: Session):
     tags = maybe_read("tags.csv")
     entry_tags = maybe_read("entry_tags.csv")
 
-    if not cars.empty:
-        db.bulk_insert_mappings(models.Car, cars.to_dict(orient="records"))
+    if not portfolios.empty:
+        db.bulk_insert_mappings(models.Portfolio, portfolios.to_dict(orient="records"))
     if not pgs.empty:
         db.bulk_insert_mappings(models.ProjectGroup, pgs.to_dict(orient="records"))
     if not projects.empty:

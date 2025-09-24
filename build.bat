@@ -9,4 +9,4 @@ pip install --upgrade pip
 pip install pyinstaller -r requirements.txt
 pyinstaller --noconfirm --clean freeze.spec
 echo.
-echo Built to dist\car-tracker\car-tracker.exe
+echo Built to dist\nexus\nexus.exe

@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # Set a custom port if you want, e.g.:
-# export CAR_TRACKER_PORT=8088
+# export NEXUS_PORT=8088
 
 if [ ! -d ".venv" ]; then
   /usr/bin/env python3 -m venv .venv
@@ -16,3 +16,4 @@ if ! python -c "import fastapi, uvicorn, sqlalchemy, pydantic, pandas" 2>/dev/nu
 fi
 
 python run_app.py
+

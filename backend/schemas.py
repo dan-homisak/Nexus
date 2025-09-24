@@ -1,16 +1,15 @@
 from typing import Optional, List
 from pydantic import BaseModel, ConfigDict
 
-# ---- Cars ----
-class CarIn(BaseModel):
+# ---- Portfolios ----
+class PortfolioIn(BaseModel):
     name: str
     fiscal_year: Optional[str] = None
     owner: Optional[str] = None
 
-class CarOut(CarIn):
+class PortfolioOut(PortfolioIn):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ---- Project Groups ----
 class ProjectGroupIn(BaseModel):
@@ -24,7 +23,7 @@ class ProjectGroupOut(ProjectGroupIn):
 
 # ---- Projects ----
 class ProjectIn(BaseModel):
-    car_id: int
+    portfolio_id: int
     name: str
     group_id: Optional[int] = None
     code: Optional[str] = None
@@ -57,7 +56,7 @@ class VendorOut(VendorIn):
 
 # ---- Allocations ----
 class AllocationIn(BaseModel):
-    car_id: int
+    portfolio_id: int
     amount: float
 
 # ---- Tags ----
@@ -74,7 +73,7 @@ class EntryIn(BaseModel):
     kind: str
     amount: float
     description: Optional[str] = None
-    car_id: int
+    portfolio_id: int
     project_id: Optional[int] = None
     category_id: Optional[int] = None
     vendor_id: Optional[int] = None
@@ -84,7 +83,7 @@ class EntryIn(BaseModel):
     tags: Optional[List[str]] = None
     # NEW
     mischarged: Optional[bool] = False
-    intended_car_id: Optional[int] = None
+    intended_portfolio_id: Optional[int] = None
 
 
 class EntryOut(EntryIn):

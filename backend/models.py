@@ -2,13 +2,13 @@ from sqlalchemy import Column, Integer, String, Float, ForeignKey, Date, Text, U
 from sqlalchemy.orm import relationship
 from .db import Base
 
-class Car(Base):
-    __tablename__ = "cars"
+class Portfolio(Base):
+    __tablename__ = "portfolios"
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True, nullable=False)
     fiscal_year = Column(String)
     owner = Column(String)
-    projects = relationship("Project", back_populates="car", cascade="all, delete")
+    projects = relationship("Project", back_populates="portfolio", cascade="all, delete")
 
 class ProjectGroup(Base):
     __tablename__ = "project_groups"
@@ -20,13 +20,13 @@ class ProjectGroup(Base):
 class Project(Base):
     __tablename__ = "projects"
     id = Column(Integer, primary_key=True)
-    car_id = Column(Integer, ForeignKey("cars.id", ondelete="CASCADE"), nullable=False)
+    portfolio_id = Column(Integer, ForeignKey("portfolios.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     group_id = Column(Integer, ForeignKey("project_groups.id"))
     code = Column(String)
     line = Column(String)
 
-    car = relationship("Car", back_populates="projects")
+    portfolio = relationship("Portfolio", back_populates="projects")
     group = relationship("ProjectGroup")
 
 class Vendor(Base):
@@ -59,7 +59,7 @@ class Entry(Base):
     amount = Column(Float, nullable=False)
     description = Column(Text)
 
-    car_id = Column(Integer, ForeignKey("cars.id"), nullable=False)
+    portfolio_id = Column(Integer, ForeignKey("portfolios.id"), nullable=False)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
     vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
@@ -69,13 +69,13 @@ class Entry(Base):
 
     # NEW
     mischarged = Column(Boolean, nullable=False, default=False)
-    intended_car_id = Column(Integer, ForeignKey("cars.id"), nullable=True)
+    intended_portfolio_id = Column(Integer, ForeignKey("portfolios.id"), nullable=True)
 
 class Allocation(Base):
     __tablename__ = "allocations"
     id = Column(Integer, primary_key=True)
     entry_id = Column(Integer, ForeignKey("entries.id", ondelete="CASCADE"), nullable=False)
-    car_id = Column(Integer, ForeignKey("cars.id"), nullable=False)
+    portfolio_id = Column(Integer, ForeignKey("portfolios.id"), nullable=False)
     amount = Column(Float, nullable=False)
 
 class Comment(Base):
