@@ -30,3 +30,4 @@ env/
 # --- Project-specific ignores ---
 data/
 cartracker.db
+# test
