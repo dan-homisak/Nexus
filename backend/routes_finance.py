@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.params import Param
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session, selectinload
 
@@ -162,6 +163,13 @@ def _jsonify(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def _param_value(value: Any) -> Any:
+    """Unwrap FastAPI Param defaults when calling routers directly."""
+    if isinstance(value, Param):  # occurs in unit tests when using function defaults
+        return value.default
+    return value
 
 
 def _document_total_amount(invoice: Optional[models_finance.Invoice], purchase_order: Optional[models_finance.PurchaseOrder]) -> Decimal:
@@ -347,6 +355,15 @@ def get_budget_commit_actual(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    funding_source_id = _param_value(funding_source_id)
+    project_id = _param_value(project_id)
+    category_id = _param_value(category_id)
+    date_from = _param_value(date_from)
+    date_to = _param_value(date_to)
+    group_by = _param_value(group_by)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     where_clauses: list[str] = []
     params: dict[str, Any] = {}
     if funding_source_id is not None:
@@ -415,6 +432,13 @@ def get_open_commitments(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    funding_source_id = _param_value(funding_source_id)
+    project_id = _param_value(project_id)
+    vendor_id = _param_value(vendor_id)
+    group_by = _param_value(group_by)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     where_clauses: list[str] = []
     params: dict[str, Any] = {}
     if funding_source_id is not None:
@@ -487,6 +511,11 @@ def get_vendor_spend_aging(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    vendor_id = _param_value(vendor_id)
+    group_by = _param_value(group_by)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     where_clauses: list[str] = []
     params: dict[str, Any] = {}
     if vendor_id is not None:
@@ -536,15 +565,24 @@ def get_vendor_spend_aging(
 @router.get("/views/open-items")
 def get_open_items(
     funding_source_id: Optional[int] = Query(default=None),
-    project_id: Optional[int] = Query(default=None),
-    vendor_id: Optional[int] = Query(default=None),
-    date_from: Optional[dt.date] = Query(default=None),
-    date_to: Optional[dt.date] = Query(default=None),
-    group_by: Optional[str] = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+   project_id: Optional[int] = Query(default=None),
+   vendor_id: Optional[int] = Query(default=None),
+   date_from: Optional[dt.date] = Query(default=None),
+   date_to: Optional[dt.date] = Query(default=None),
+   group_by: Optional[str] = Query(default=None),
+   limit: int = Query(default=200, ge=1, le=1000),
+   offset: int = Query(default=0, ge=0),
+   db: Session = Depends(get_db),
 ):
+    funding_source_id = _param_value(funding_source_id)
+    project_id = _param_value(project_id)
+    vendor_id = _param_value(vendor_id)
+    date_from = _param_value(date_from)
+    date_to = _param_value(date_to)
+    group_by = _param_value(group_by)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     where_clauses: list[str] = []
     params: dict[str, Any] = {}
     if funding_source_id is not None:
@@ -628,6 +666,15 @@ def get_future_plan(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    funding_source_id = _param_value(funding_source_id)
+    project_id = _param_value(project_id)
+    category_id = _param_value(category_id)
+    date_from = _param_value(date_from)
+    date_to = _param_value(date_to)
+    group_by = _param_value(group_by)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     where_clauses: list[str] = []
     params: dict[str, Any] = {}
     if funding_source_id is not None:
@@ -706,6 +753,11 @@ def get_to_car_closure(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    funding_source_id = _param_value(funding_source_id)
+    group_by = _param_value(group_by)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     where_clauses: list[str] = []
     params: dict[str, Any] = {}
     if funding_source_id is not None:
@@ -848,6 +900,17 @@ def list_payment_schedules(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    funding_source_id = _param_value(funding_source_id)
+    project_id = _param_value(project_id)
+    vendor_id = _param_value(vendor_id)
+    po_id = _param_value(po_id)
+    invoice_id = _param_value(invoice_id)
+    due_from = _param_value(due_from)
+    due_to = _param_value(due_to)
+    status = _param_value(status)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     stmt = select(models_finance.PaymentSchedule).options(
         selectinload(models_finance.PaymentSchedule.purchase_order),
         selectinload(models_finance.PaymentSchedule.invoice),
@@ -995,6 +1058,13 @@ def list_fx_rates(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    quote_currency = _param_value(quote_currency)
+    valid_from = _param_value(valid_from)
+    valid_to = _param_value(valid_to)
+    active_on = _param_value(active_on)
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     stmt = select(models_finance.FxRate)
     if quote_currency:
         stmt = stmt.where(models_finance.FxRate.quote_currency == quote_currency.upper())
@@ -1130,6 +1200,13 @@ def list_deliverables(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
+    po_id = _param_value(po_id)
+    po_line_id = _param_value(po_line_id)
+    status = _param_value(status)
+    late_only = bool(_param_value(late_only))
+    limit = _param_value(limit)
+    offset = _param_value(offset)
+
     stmt = select(models_finance.FulfillmentLot).options(
         selectinload(models_finance.FulfillmentLot.milestones),
         selectinload(models_finance.FulfillmentLot.po_line).selectinload(models_finance.POLine.purchase_order),
