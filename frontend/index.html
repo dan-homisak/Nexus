@@ -8,6 +8,9 @@
   <!-- Inline favicon to stop 404s -->
   <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="%231d2230"/><text x="50%" y="54%" font-size="32" text-anchor="middle" fill="%23cfe0ff" font-family="Segoe UI, Roboto, Arial">N</text></svg>' />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script defer src="/config.js"></script>
+  <script defer src="/apiNew.js"></script>
+  <script defer src="/api/index.js"></script>
   <!-- Defer so the script runs after the DOM is parsed -->
   <script defer src="/app.js"></script>
 </head>
@@ -23,13 +26,17 @@
   </header>
 
   <nav>
-    <button data-tab="portfolios">Portfolios</button>
+    <button data-tab="portfolios">Funding Sources</button>
     <button data-tab="project_groups">Project Groups</button>
     <button data-tab="projects">Projects</button>
     <button data-tab="categories">Categories</button>
     <button data-tab="vendors">Vendors</button>
     <button data-tab="entries">Entries</button>
     <button data-tab="pivots">Pivots</button>
+    <button data-tab="payments" data-feature="PAYMENT_SCHEDULES">Payments</button>
+    <button data-tab="deliverables" data-feature="DELIVERABLES">Deliverables</button>
+    <button data-tab="reports" data-feature="SAVED_REPORTS">Reports</button>
+    <button data-tab="fx" data-feature="FX_ADMIN">FX Rates</button>
     <button data-tab="tags">Tags</button>
   </nav>
 

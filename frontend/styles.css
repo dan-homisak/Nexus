@@ -65,3 +65,26 @@ button[disabled] { opacity:.6; cursor:not-allowed; }
 .progress > div { height:100%; background:#2a5f3b; }
 .progress.warn > div { background:#6b5822; }
 .progress.err > div { background:#7a2e33; }
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 340px;
+  background: #111319;
+  border-left: 1px solid var(--border);
+  box-shadow: -6px 0 12px rgba(0,0,0,0.25);
+  padding: 16px;
+  z-index: 900;
+  overflow-y: auto;
+}
+.drawer.hidden { display:none; }
+.drawer-panel { display:flex; flex-direction:column; gap:12px; }
+.drawer-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+.drawer-header button { border:none; background:none; color:var(--text); font-size:20px; cursor:pointer; }
+.drawer .actions { margin-top:12px; }
+
+.report-list { list-style:none; margin:0; padding:0; }
+.report-list li { padding:8px; border-bottom:1px solid var(--border); cursor:pointer; }
+.report-list li:hover { background:#1a1f2b; }

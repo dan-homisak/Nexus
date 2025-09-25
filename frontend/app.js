@@ -38,6 +38,9 @@
         const apiCreate = (p, b) => api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
         const apiUpdate = (p, b) => api(p, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
         const apiDelete = (p) => api(p, { method: 'DELETE' });
+
+        const ApiNew = window.Api || {};
+        const FEATURES = window.FEATURES || {};
   
         // ---- UI helpers ----
         const escapeTip = (s) => String(s).replace(/"/g, '&quot;');
@@ -61,10 +64,49 @@
               <td>
                 <button onclick="window.__updateRow?.('${base}', ${r.id}, this)">Save</button>
                 <button onclick="window.__deleteRow?.('${base}', ${r.id})">Delete</button>
+                ${base === '/api/entries' && FEATURES.REALLOCATE ? `<button class="btn-reallocate" data-entry-id="${r.id}">⋯</button>` : ''}
               </td>
             </tr>`).join('');
           return `<table class="table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
         };
+
+        const fmtCurrency = (value) => {
+          if (value === null || value === undefined || value === '') return '-';
+          const num = Number(value);
+          if (Number.isNaN(num)) return String(value);
+          return '$' + num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        };
+
+        const readOnlyTable = (rows, columns) => {
+          if (!rows || !rows.length) return '<div>(empty)</div>';
+          const thead = '<tr>' + columns.map(col => `<th>${col.label}</th>`).join('') + '</tr>';
+          const tbody = rows.map(row => {
+            const cells = columns.map(col => {
+              const value = row[col.key];
+              return `<td>${col.format ? col.format(value, row) : (value ?? '')}</td>`;
+            }).join('');
+            return `<tr>${cells}</tr>`;
+          }).join('');
+          return `<table class="table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
+        };
+
+        const computeStatus = (budget, actual) => {
+          const b = Number(budget || 0);
+          const a = Number(actual || 0);
+          if (b <= 0 && a > 0) return 'Over';
+          if (a <= b) return 'On Track';
+          const pct = b ? ((a - b) / b) * 100 : 100;
+          if (pct <= 10) return 'Warning';
+          return 'Over';
+        };
+
+        const ensureTabVisibility = () => {
+          nav.querySelectorAll('button[data-feature]').forEach(btn => {
+            const flag = btn.dataset.feature;
+            if (!FEATURES[flag]) btn.style.display = 'none';
+          });
+        };
+        ensureTabVisibility();
   
         const mapBy = (arr, key='id') => Object.fromEntries(arr.map(x=>[x[key], x]));
         const catPath = (cat, byId) => {
@@ -72,6 +114,93 @@
           while (cur) { path.unshift(cur.name); if (!cur.parent_id) break; cur = byId[cur.parent_id]; }
           return path.join(' > ');
         };
+
+        let reallocateDrawer = null;
+        let reallocateCurrent = null;
+        let reallocateSubmit = null;
+
+        function ensureReallocateDrawer() {
+          if (reallocateDrawer) return reallocateDrawer;
+          const drawer = document.createElement('div');
+          drawer.id = 'reallocateDrawer';
+          drawer.className = 'drawer hidden';
+          drawer.innerHTML = `
+            <div class="drawer-panel">
+              <div class="drawer-header">
+                <h3>Reallocate Entry</h3>
+                <button type="button" id="closeReallocate">×</button>
+              </div>
+              <form id="reallocateForm">
+                <div class="field"><label>Source</label><div id="reallocateSource"></div></div>
+                <div class="field">
+                  <label for="reallocateFunding">Destination Funding Source</label>
+                  <select name="funding_source" id="reallocateFunding"></select>
+                </div>
+                <div class="field">
+                  <label for="reallocateCategory">Destination Category</label>
+                  <select name="category" id="reallocateCategory"></select>
+                </div>
+                <div class="field">
+                  <label for="reallocateAmount">Amount</label>
+                  <input id="reallocateAmount" name="amount" type="number" step="0.01" />
+                </div>
+                <div class="field">
+                  <label for="reallocateMemo">Memo</label>
+                  <input id="reallocateMemo" name="memo" placeholder="Reason" />
+                </div>
+                <div class="actions">
+                  <button type="submit">Submit</button>
+                </div>
+              </form>
+            </div>`;
+          document.body.appendChild(drawer);
+          drawer.querySelector('#closeReallocate').onclick = () => closeReallocate();
+          reallocateSubmit = drawer.querySelector('#reallocateForm');
+          reallocateSubmit.addEventListener('submit', async (evt) => {
+            evt.preventDefault();
+            if (!reallocateCurrent) return;
+            const fsId = Number(drawer.querySelector('#reallocateFunding').value);
+            const categoryId = Number(drawer.querySelector('#reallocateCategory').value);
+            const amount = drawer.querySelector('#reallocateAmount').value;
+            const memo = drawer.querySelector('#reallocateMemo').value || 'Reallocate entry';
+            if (!fsId || Number.isNaN(fsId)) return alert('Pick a funding source.');
+            if (!categoryId || Number.isNaN(categoryId)) return alert('Pick a category.');
+            try {
+              await ApiNew.postReallocate({
+                transaction_id: reallocateCurrent.transaction_id || String(reallocateCurrent.id),
+                target_funding_source_id: fsId,
+                amount: Number(amount || reallocateCurrent.amount || 0),
+                memo,
+              });
+              alert('Reallocation sent.');
+              closeReallocate();
+              renderEntries();
+            } catch (err) {
+              showError(err);
+            }
+          });
+          reallocateDrawer = drawer;
+          return drawer;
+        }
+
+        function openReallocate(entry, fundingSources, categories) {
+          reallocateCurrent = entry;
+          const drawer = ensureReallocateDrawer();
+          drawer.classList.remove('hidden');
+          const sourceBox = drawer.querySelector('#reallocateSource');
+          sourceBox.innerHTML = `#${entry.id} • ${entry.kind || ''} • ${fmtCurrency(entry.amount)}\n<small>${entry.description || ''}</small>`;
+          const fundingSel = drawer.querySelector('#reallocateFunding');
+          const categorySel = drawer.querySelector('#reallocateCategory');
+          fundingSel.innerHTML = fundingSources.map(fs => `<option value="${fs.id}">${fs.name}</option>`).join('');
+          categorySel.innerHTML = categories.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
+          drawer.querySelector('#reallocateAmount').value = entry.amount || '';
+          drawer.querySelector('#reallocateMemo').value = '';
+        }
+
+        function closeReallocate() {
+          if (reallocateDrawer) reallocateDrawer.classList.add('hidden');
+          reallocateCurrent = null;
+        }
   
         // Expose update/delete for table buttons
         window.__updateRow = async function(base, id, btn){
@@ -118,14 +247,14 @@
         async function renderPortfolios(){
           const portfolios = await apiList('/api/portfolios');
           content.innerHTML =
-            card('Add Portfolio', `
+            card('Add Funding Source', `
               <div class="row">
                 ${field('name', labelFor('name','Name', 'e.g., "FY25 CapEx – Line EX6".'), input('name','FY25 CapEx'))}
-                ${field('fiscal_year', labelFor('fiscal_year','Fiscal Year', 'Optional: FY25 or 2025.'), input('fiscal_year','FY25'))}
-                ${field('owner', labelFor('owner','Owner', 'Approver/owner.'), input('owner','Dan'))}
+                ${field('fiscal_year', labelFor('fiscal_year','Fiscal Year', 'Optional metadata (FY25 or 2025).'), input('fiscal_year','FY25'))}
+                ${field('owner', labelFor('owner','Owner', 'Approver / controller.'), input('owner','Dan'))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All Portfolios', table(portfolios, ['id','name','fiscal_year','owner'], '/api/portfolios'));
+            + card('All Funding Sources', table(portfolios, ['id','name','fiscal_year','owner'], '/api/portfolios'));
   
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
@@ -168,7 +297,7 @@
           content.innerHTML =
             card('Add Project', `
               <div class="row">
-                ${field('portfolio_id', labelFor('portfolio_id','Portfolio', 'Each project belongs to a single portfolio.'), select('portfolio_id', portfolioOpts))}
+                ${field('portfolio_id', labelFor('portfolio_id','Funding Source', 'Each project belongs to a single funding source.'), select('portfolio_id', portfolioOpts))}
                 ${field('name', labelFor('name','Project Name', 'Per-portfolio project name (duplicates allowed across portfolios).'), input('name','Cobra'))}
                 ${field('group_id', labelFor('group_id','Project Group', 'Use to roll up similar projects across portfolios.'), select('group_id', pgOpts))}
                 ${field('code', labelFor('code','Project Code (optional)','Internal alias'), input('code','COBRA-PM1'))}
@@ -263,19 +392,24 @@
   
         // ---- Entries ----
         async function renderEntries(){
-          const [portfolios, projects, categories, vendors, entries] = await Promise.all([
-            apiList('/api/portfolios'), apiList('/api/projects'), apiList('/api/categories'), apiList('/api/vendors'), apiList('/api/entries')
+          const [portfolios, projects, categories, vendors, entries, fundingSources] = await Promise.all([
+            apiList('/api/portfolios'),
+            apiList('/api/projects'),
+            apiList('/api/categories'),
+            apiList('/api/vendors'),
+            apiList('/api/entries'),
+            apiList('/api/funding-sources'),
           ]);
           const portfolioMap = mapBy(portfolios);
-          const portfolioOpts = portfolios.map(p=>({value:p.id,label:`${p.name}${p.fiscal_year ? ' • FY '+p.fiscal_year : ''}`}));
-          const projOpts = projects.map(p=>{
-            const portfolio = portfolioMap[p.portfolio_id];
-            const portfolioLabel = portfolio ? `${portfolio.name}${portfolio.fiscal_year ? ' • FY '+portfolio.fiscal_year : ''}` : `Portfolio ${p.portfolio_id}`;
-            return {value:p.id, label:`[${portfolioLabel}] ${p.name}`};
+          const portfolioOpts = portfolios.map(p => ({ value: p.id, label: `${p.name}${p.fiscal_year ? ' • FY ' + p.fiscal_year : ''}` }));
+          const projectOpts = projects.map(p => {
+            const fs = portfolioMap[p.portfolio_id];
+            const fsLabel = fs ? `${fs.name}${fs.fiscal_year ? ' • FY ' + fs.fiscal_year : ''}` : `Funding ${p.portfolio_id}`;
+            return { value: p.id, label: `[${fsLabel}] ${p.name}` };
           });
-          const catMap = mapBy(categories);
-          const catOpts = categories.map(c=>({value:c.id, label:`${catPath(c, catMap)}${c.project_id ? ` (Project ${c.project_id})` : ''}`}));
-          const vendorOpts = vendors.map(v=>({value:v.id,label:v.name}));
+          const categoryMap = mapBy(categories);
+          const categoryOpts = categories.map(c => ({ value: c.id, label: catPath(c, categoryMap) }));
+          const vendorOpts = vendors.map(v => ({ value: v.id, label: v.name }));
 
           content.innerHTML =
             card('Add Entry', `
@@ -299,9 +433,9 @@
                   <div class="section">
                     <div class="title">Scope</div>
                     <div class="row three">
-                      ${field('portfolio_id', labelFor('portfolio_id','Portfolio','Primary portfolio charged.'), select('portfolio_id', portfolioOpts))}
-                      ${field('project_id', labelFor('project_id','Project','Per-portfolio project (groups roll up across portfolios).'), select('project_id', projOpts))}
-                      ${field('category_id', labelFor('category_id','Category (n-level)','Pick most specific leaf.'), select('category_id', catOpts))}
+                      ${field('portfolio_id', labelFor('portfolio_id','Funding Source','Primary funding source charged.'), select('portfolio_id', portfolioOpts))}
+                      ${field('project_id', labelFor('project_id','Project','Per funding-source project.'), select('project_id', projectOpts))}
+                      ${field('category_id', labelFor('category_id','Category (n-level)','Pick the most specific leaf.'), select('category_id', categoryOpts))}
                     </div>
                   </div>
 
@@ -315,13 +449,13 @@
                   </div>
 
                   <div class="section">
-                    <div class="title">Wrong Portfolio? <span class="hint">(flag to fix later)</span></div>
+                    <div class="title">Wrong Source? <span class="hint">(flag to fix later)</span></div>
                     <div class="row two">
                       <div class="field">
-                        ${labelFor('mischarged','Mark as mischarged','Check to flag this entry as charged to the wrong portfolio.')}
+                        ${labelFor('mischarged','Mark as mischarged','Check to flag this entry as charged to the wrong funding source.')}
                         <input type="checkbox" name="mischarged"/>
                       </div>
-                      ${field('intended_portfolio_id', labelFor('intended_portfolio_id','Intended Portfolio','Where it *should* be charged. Used in Ideal scenario.'), select('intended_portfolio_id', [{value:'',label:'(none)'}].concat(portfolioOpts)))}
+                      ${field('intended_portfolio_id', labelFor('intended_portfolio_id','Intended Funding Source','Where it *should* be charged.'), select('intended_portfolio_id', [{ value: '', label: '(none)' }].concat(portfolioOpts)))}
                     </div>
                   </div>
 
@@ -334,7 +468,7 @@
                   </div>
 
                   <div class="section">
-                    <div class="title">Allocations <span class="hint">(optional)</span> <span class="info" data-tip="Split the amount across multiple portfolios. Sum must equal Amount.">i</span></div>
+                    <div class="title">Allocations <span class="hint">(optional)</span> <span class="info" data-tip="Split the amount across multiple funding sources. Sum must equal Amount.">i</span></div>
                     <div id="allocs"></div>
                     <button id="addAlloc">+ Allocation</button>
                   </div>
@@ -351,7 +485,6 @@
               'id','date','kind','amount','portfolio_id','project_id','category_id','vendor_id','po_number','quote_ref','mischarged','intended_portfolio_id','description'
             ], '/api/entries'));
 
-          // Show/Hide intended portfolio when mischarged checked
           const misBox = content.querySelector('input[name=mischarged]');
           const intendedSel = content.querySelector('select[name=intended_portfolio_id]');
           if (misBox && intendedSel) {
@@ -359,13 +492,29 @@
             sync(); misBox.addEventListener('change', sync);
           }
 
+          if (FEATURES.REALLOCATE) {
+            const catOptionsForDrawer = categoryOpts.map(c => ({ id: c.value, label: c.label }));
+            content.querySelectorAll('.btn-reallocate').forEach(btn => {
+              btn.addEventListener('click', () => {
+                const entryId = Number(btn.dataset.entryId);
+                const entry = entries.find(e => e.id === entryId);
+                if (!entry) return;
+                if (!entry.transaction_id && !entry.id) {
+                  alert('Entry missing transaction reference; cannot reallocate yet.');
+                  return;
+                }
+                openReallocate(entry, fundingSources, catOptionsForDrawer);
+              });
+            });
+          }
+
           const allocsDiv = document.getElementById('allocs');
           const addAlloc = document.getElementById('addAlloc');
           if (addAlloc) addAlloc.onclick = () => {
             allocsDiv.insertAdjacentHTML('beforeend', `
               <div class="row four" data-row="1" style="margin-bottom:6px">
-                ${field('alloc_portfolio', labelFor('alloc_portfolio','Alloc Portfolio','Portfolio receiving part of this amount.'), select('alloc_portfolio', portfolioOpts))}
-                ${field('alloc_amount', labelFor('alloc_amount','Amount','Portion to this portfolio.'), input('alloc_amount',''))}
+                ${field('alloc_portfolio', labelFor('alloc_portfolio','Funding Source','Destination funding source.'), select('alloc_portfolio', portfolioOpts))}
+                ${field('alloc_amount', labelFor('alloc_amount','Amount','Portion to this funding source.'), input('alloc_amount',''))}
                 <div class="field"><label>&nbsp;</label><button onclick="this.closest('[data-row]').remove()">Remove</button></div>
               </div>`);
           };
@@ -375,23 +524,23 @@
             const k = KIND_HELP[kindSel.value];
             const box = document.getElementById('kindHelp');
             if (box) box.outerHTML = helpBox(kindSel.value);
-            content.querySelectorAll('.required').forEach(el=>el.classList.remove('required'));
-            ['amount','portfolio_id','vendor_id','quote_ref','po_number'].forEach(n=>{
-              const el = content.querySelector(`[for="${n}"]`);
-              if (el) el.classList.remove('required');
+            content.querySelectorAll('.required').forEach(el => el.classList.remove('required'));
+            ['amount','portfolio_id','vendor_id','quote_ref','po_number'].forEach(name => {
+              const label = content.querySelector(`[for="${name}"]`);
+              if (label) label.classList.remove('required');
             });
-            k.required.forEach(name=>{
-              const el = content.querySelector(`[for="${name}"]`);
-              if (el) el.classList.add('required');
+            k.required.forEach(name => {
+              const label = content.querySelector(`[for="${name}"]`);
+              if (label) label.classList.add('required');
             });
           };
           if (kindSel) kindSel.onchange = markRequired;
           markRequired();
 
           const addBtn = document.getElementById('addEntry');
-          if (addBtn) addBtn.onclick = async ()=>{
+          if (addBtn) addBtn.onclick = async () => {
             try {
-              const get = name => {
+              const getField = (name) => {
                 const el = content.querySelector(`[name=${name}]`);
                 if (!el) return null;
                 if (el.type === 'checkbox') return !!el.checked;
@@ -399,48 +548,617 @@
               };
               const allocations = [...allocsDiv.querySelectorAll('[data-row]')].map(div => ({
                 portfolio_id: Number(div.querySelector('select[name=alloc_portfolio]').value),
-                amount: Number(div.querySelector('input[name=alloc_amount]').value)
+                amount: Number(div.querySelector('input[name=alloc_amount]').value),
               }));
-  
+
               const body = {
-                date: get('date'),
-                kind: String(get('kind') || 'budget'),
-                amount: Number(get('amount')),
-                description: get('description'),
-                portfolio_id: get('portfolio_id') ? Number(get('portfolio_id')) : null,
-                project_id: get('project_id') ? Number(get('project_id')) : null,
-                category_id: get('category_id') ? Number(get('category_id')) : null,
-                vendor_id: get('vendor_id') ? Number(get('vendor_id')) : null,
-                po_number: get('po_number'),
-                quote_ref: get('quote_ref'),
-                mischarged: get('mischarged') || false,
-                intended_portfolio_id: get('intended_portfolio_id') ? Number(get('intended_portfolio_id')) : null,
-                allocations: allocations.length? allocations : null,
-                tags: (get('tags')||'').split(',').map(s=>s.trim()).filter(Boolean) || null
+                date: getField('date'),
+                kind: String(getField('kind') || 'budget'),
+                amount: Number(getField('amount')),
+                description: getField('description'),
+                portfolio_id: getField('portfolio_id') ? Number(getField('portfolio_id')) : null,
+                project_id: getField('project_id') ? Number(getField('project_id')) : null,
+                category_id: getField('category_id') ? Number(getField('category_id')) : null,
+                vendor_id: getField('vendor_id') ? Number(getField('vendor_id')) : null,
+                po_number: getField('po_number'),
+                quote_ref: getField('quote_ref'),
+                mischarged: getField('mischarged') || false,
+                intended_portfolio_id: getField('intended_portfolio_id') ? Number(getField('intended_portfolio_id')) : null,
+                allocations: allocations.length ? allocations : null,
+                tags: (getField('tags') || '').split(',').map(s => s.trim()).filter(Boolean) || null,
               };
-  
+
               const req = KIND_HELP[body.kind].required;
               const missing = [];
-              req.forEach(name=>{
-                const v = body[name];
-                const ok = (typeof v === 'number') ? !Number.isNaN(v) : !!v;
-                if(!ok){ missing.push(name); const el = content.querySelector(`[name=${name}]`); if(el) el.classList.add('invalid'); }
+              req.forEach(name => {
+                const value = body[name];
+                const ok = typeof value === 'number' ? !Number.isNaN(value) : !!value;
+                if (!ok) {
+                  missing.push(name);
+                  const el = content.querySelector(`[name=${name}]`);
+                  if (el) el.classList.add('invalid');
+                }
               });
-              if(missing.length){
+
+              if (missing.length) {
                 alert(`Missing required fields for kind="${body.kind}": ${missing.join(', ')}`);
                 return;
               }
+
               if (body.mischarged && !body.intended_portfolio_id) {
-                alert('Please choose the intended portfolio for a mischarged entry.');
+                alert('Please choose the intended funding source for a mischarged entry.');
                 return;
               }
-              if (body.allocations && body.allocations.length){
-                const sum = body.allocations.reduce((a,b)=>a + (Number(b.amount)||0), 0);
-                if (Math.abs(sum - body.amount) > 1e-6){
+
+              if (body.allocations && body.allocations.length) {
+                const sum = body.allocations.reduce((acc, item) => acc + (Number(item.amount) || 0), 0);
+                if (Math.abs(sum - body.amount) > 1e-6) {
                   alert(`Allocations must sum to Amount (${body.amount}). Current total: ${sum}`);
                   return;
                 }
               }
+
+              await apiCreate('/api/entries', body);
+              renderEntries();
+
+            } catch (err) {
+              showError(err);
+            }
+          };
+        }
+        async function renderPayments(){
+          if (!FEATURES.PAYMENT_SCHEDULES) {
+            content.innerHTML = card('Payments', '<p>Payment schedule management is disabled.</p>');
+            return;
+          }
+
+          const [fundingSources, projects, vendors] = await Promise.all([
+            apiList('/api/funding-sources'),
+            apiList('/api/projects'),
+            apiList('/api/vendors'),
+          ]);
+
+          const fsOptions = [{ value: '', label: '(any funding source)' }].concat(fundingSources.map(fs => ({ value: fs.id, label: fs.name })));
+          const projectOptions = [{ value: '', label: '(any project)' }].concat(projects.map(p => ({ value: p.id, label: p.name })));
+          const vendorOptions = [{ value: '', label: '(any vendor)' }].concat(vendors.map(v => ({ value: v.id, label: v.name })));
+
+          content.innerHTML = `
+            ${card('Payment Schedule Filters', `
+              <div class="row four">
+                ${field('payment_fs', labelFor('payment_fs', 'Funding Source'), select('payment_fs', fsOptions))}
+                ${field('payment_project', labelFor('payment_project', 'Project'), select('payment_project', projectOptions))}
+                ${field('payment_vendor', labelFor('payment_vendor', 'Vendor'), select('payment_vendor', vendorOptions))}
+                ${field('payment_status', labelFor('payment_status', 'Status'), `<select name="payment_status">
+                    <option value="">(any)</option>
+                    <option value="PLANNED">PLANNED</option>
+                    <option value="DUE">DUE</option>
+                    <option value="PAID">PAID</option>
+                    <option value="CANCELLED">CANCELLED</option>
+                  </select>`)}
+              </div>
+              <div class="row three">
+                ${field('payment_due_from', labelFor('payment_due_from', 'Due From'), `<input type="date" name="payment_due_from" class="input" />`)}
+                ${field('payment_due_to', labelFor('payment_due_to', 'Due To'), `<input type="date" name="payment_due_to" class="input" />`)}
+                <div class="field"><label>&nbsp;</label><button id="applyPayments">Apply</button></div>
+              </div>
+            `)}
+            ${card('Generate Default Schedule', `
+              <div class="row three">
+                ${field('generate_po', labelFor('generate_po','PO ID','Leave blank if generating from invoice.'), input('generate_po','PO id'))}
+                ${field('generate_invoice', labelFor('generate_invoice','Invoice ID','Leave blank if generating from PO.'), input('generate_invoice','Invoice id'))}
+                <div class="field"><label>&nbsp;</label><button id="generateDefault">Generate</button></div>
+              </div>
+            `)}
+            <div id="paymentsTable" class="card"></div>
+          `;
+
+          const filters = {
+            fs: content.querySelector('select[name=payment_fs]'),
+            project: content.querySelector('select[name=payment_project]'),
+            vendor: content.querySelector('select[name=payment_vendor]'),
+            status: content.querySelector('select[name=payment_status]'),
+            from: content.querySelector('input[name=payment_due_from]'),
+            to: content.querySelector('input[name=payment_due_to]'),
+          };
+
+          const tableContainer = document.getElementById('paymentsTable');
+
+          async function loadSchedules(){
+            try {
+              const params = {};
+              if (filters.fs.value) params.funding_source_id = filters.fs.value;
+              if (filters.project.value) params.project_id = filters.project.value;
+              if (filters.vendor.value) params.vendor_id = filters.vendor.value;
+              if (filters.status.value) params.status = filters.status.value;
+              if (filters.from.value) params.due_from = filters.from.value;
+              if (filters.to.value) params.due_to = filters.to.value;
+
+              const rows = await ApiNew.listPaymentSchedules(params);
+              if (!rows.length) {
+                tableContainer.innerHTML = '<p>No schedules found.</p>';
+                return;
+              }
+              const html = `
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Doc</th>
+                      <th>Rule</th>
+                      <th>Due Date</th>
+                      <th>Amount</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${rows.map(r => {
+                      const label = r.invoice_id ? `Invoice ${r.invoice_id}` : (r.purchase_order_id ? `PO ${r.purchase_order_id}` : 'Manual');
+                      return `<tr data-id="${r.id}">
+                        <td>${r.id}</td>
+                        <td>${label}</td>
+                        <td>${r.due_date_rule || '-'}</td>
+                        <td>${r.due_date || '-'}</td>
+                        <td>${fmtCurrency(r.amount)}</td>
+                        <td>${r.status}</td>
+                        <td><button class="btn-edit-payment">Edit</button></td>
+                      </tr>`;
+                    }).join('')}
+                  </tbody>
+                </table>`;
+              tableContainer.innerHTML = html;
+              tableContainer.querySelectorAll('.btn-edit-payment').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                  const row = btn.closest('tr');
+                  const id = row.getAttribute('data-id');
+                  const due = prompt('Due date (YYYY-MM-DD)', row.children[3].textContent.trim());
+                  const amountStr = prompt('Amount (USD)', row.children[4].textContent.replace(/[^0-9.\-]/g, ''));
+                  const status = prompt('Status (PLANNED/DUE/PAID/CANCELLED)', row.children[5].textContent.trim());
+                  if (!due && !amountStr && !status) return;
+                  try {
+                    await ApiNew.updatePaymentSchedule(id, {
+                      due_date: due || undefined,
+                      amount: amountStr ? Number(amountStr) : undefined,
+                      status: status || undefined,
+                    });
+                    alert('Payment schedule updated.');
+                    loadSchedules();
+                  } catch (err) {
+                    showError(err);
+                  }
+                });
+              });
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          document.getElementById('applyPayments').onclick = loadSchedules;
+          document.getElementById('generateDefault').onclick = async () => {
+            try {
+              const po = content.querySelector('input[name=generate_po]').value.trim();
+              const invoice = content.querySelector('input[name=generate_invoice]').value.trim();
+              const body = {};
+              if (po) body.po_id = Number(po);
+              if (invoice) body.invoice_id = Number(invoice);
+              if (!body.po_id && !body.invoice_id) {
+                alert('Provide a PO or Invoice id.');
+                return;
+              }
+              await ApiNew.generatePaymentSchedule(body);
+              alert('Default schedule generated.');
+              loadSchedules();
+            } catch (err) {
+              showError(err);
+            }
+          };
+
+          loadSchedules();
+        }
+
+        async function renderDeliverables(){
+          if (!FEATURES.DELIVERABLES) {
+            content.innerHTML = card('Deliverables', '<p>Deliverables tracking is disabled.</p>');
+            return;
+          }
+
+          const [purchaseOrders, checkpointTypes] = await Promise.all([
+            apiList('/api/purchase-orders'),
+            ApiNew.listCheckpointTypes(),
+          ]);
+
+          const poOptions = [{ value: '', label: '(select PO)' }].concat(purchaseOrders.map(po => ({ value: po.id, label: `${po.po_number} (${po.currency})` })));
+
+          content.innerHTML = `
+            ${card('Deliverables & Milestones', `
+              <div class="row three">
+                ${field('deliverable_po', labelFor('deliverable_po','Purchase Order'), select('deliverable_po', poOptions))}
+                ${field('deliverable_po_line', labelFor('deliverable_po_line','PO Line'), '<select name="deliverable_po_line"><option value="">(select line)</option></select>')}
+                <div class="field"><label>&nbsp;</label><button id="refreshDeliverables">Load Lots</button></div>
+              </div>
+              <div class="row two">
+                <div class="field"><label>&nbsp;</label><button id="createLot">Create Lot</button></div>
+                <div class="field"><label>&nbsp;</label><button id="applyDeliverableTemplate">Apply Template</button></div>
+              </div>
+            `)}
+            <div id="deliverablesPanel" class="card"><em>Select a PO line to view lots and milestones.</em></div>
+          `;
+
+          const poSelect = content.querySelector('select[name=deliverable_po]');
+          const lineSelect = content.querySelector('select[name=deliverable_po_line]');
+          const panel = document.getElementById('deliverablesPanel');
+
+          function populateLines(poId){
+            const po = purchaseOrders.find(p => p.id === Number(poId));
+            if (!po) {
+              lineSelect.innerHTML = '<option value="">(select line)</option>';
+              return;
+            }
+            const opts = po.lines.map(line => `<option value="${line.id}">${line.description || 'Line'} — Qty ${line.quantity || 0}</option>`);
+            lineSelect.innerHTML = '<option value="">(all lines)</option>' + opts.join('');
+          }
+
+          poSelect.addEventListener('change', () => {
+            populateLines(poSelect.value);
+          });
+
+          async function loadLots(){
+            const poId = Number(poSelect.value);
+            if (!poId) {
+              panel.innerHTML = '<p>Please pick a purchase order.</p>';
+              return;
+            }
+            const lineId = Number(lineSelect.value) || undefined;
+            try {
+              const params = lineId ? { po_line_id: lineId } : { po_id: poId };
+              const lots = await ApiNew.listDeliverables(params);
+              if (!lots.length) {
+                panel.innerHTML = '<p>No fulfillment lots yet.</p>';
+                return;
+              }
+              const html = lots.map(lot => {
+                const milestoneRows = (lot.milestones || []).map(m => {
+                  return `<tr data-mid="${m.id}">
+                    <td>${m.id}</td>
+                    <td>${m.checkpoint_type_id}</td>
+                    <td>${m.planned_date || '-'}</td>
+                    <td>${m.actual_date || '-'}</td>
+                    <td>${m.status}</td>
+                    <td><button class="btn-milestone" data-mid="${m.id}">Set Actual</button></td>
+                  </tr>`;
+                }).join('');
+                return `
+                  <div class="card">
+                    <h4>Lot ${lot.id} — Qty ${lot.lot_qty}</h4>
+                    <table class="table">
+                      <thead><tr><th>ID</th><th>Checkpoint</th><th>Planned</th><th>Actual</th><th>Status</th><th>Action</th></tr></thead>
+                      <tbody>${milestoneRows || '<tr><td colspan="6">No milestones</td></tr>'}</tbody>
+                    </table>
+                  </div>`;
+              }).join('');
+              panel.innerHTML = html;
+              panel.querySelectorAll('.btn-milestone').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                  const milestoneId = btn.dataset.mid;
+                  const actual = prompt('Actual date (YYYY-MM-DD)', new Date().toISOString().slice(0,10));
+                  if (!actual) return;
+                  try {
+                    await ApiNew.updateMilestone(milestoneId, { actual_date: actual });
+                    loadLots();
+                  } catch (err) {
+                    showError(err);
+                  }
+                });
+              });
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          document.getElementById('refreshDeliverables').onclick = loadLots;
+
+          document.getElementById('createLot').onclick = async () => {
+            const lineId = Number(lineSelect.value);
+            if (!lineId) {
+              alert('Pick a PO line first.');
+              return;
+            }
+            const qty = prompt('Lot quantity', '1');
+            if (!qty) return;
+            try {
+              await ApiNew.createLot(lineId, { lot_qty: Number(qty) });
+              alert('Lot created.');
+              loadLots();
+            } catch (err) {
+              showError(err);
+            }
+          };
+
+          document.getElementById('applyDeliverableTemplate').onclick = async () => {
+            const poId = Number(poSelect.value);
+            if (!poId) {
+              alert('Pick a purchase order.');
+              return;
+            }
+            const lineId = Number(lineSelect.value) || null;
+            const lotQty = prompt('Lot quantities (comma separated)', '5,5');
+            if (!lotQty) return;
+            const checkpoints = prompt('Checkpoint type IDs (comma separated)', checkpointTypes.map(c => c.id).join(','));
+            if (!checkpoints) return;
+            try {
+              await ApiNew.applyDeliverablesTemplate({
+                purchase_order_id: poId,
+                po_line_ids: lineId ? [lineId] : undefined,
+                lot_quantities: lotQty.split(',').map(v => Number(v.trim())).filter(v => !Number.isNaN(v)),
+                checkpoint_type_ids: checkpoints.split(',').map(v => Number(v.trim())).filter(v => !Number.isNaN(v)),
+              });
+              alert('Template applied.');
+              loadLots();
+            } catch (err) {
+              showError(err);
+            }
+          };
+
+          if (poOptions.length > 1) {
+            poSelect.value = poOptions[1].value;
+            populateLines(poSelect.value);
+            loadLots();
+          }
+        }
+
+        async function renderReports(){
+          if (!FEATURES.SAVED_REPORTS) {
+            content.innerHTML = card('Reports', '<p>Saved reports are disabled.</p>');
+            return;
+          }
+
+          const views = [
+            { value: 'v_budget_commit_actual', label: 'Budget vs Commit/Actual' },
+            { value: 'v_open_commitments', label: 'Open Commitments' },
+            { value: 'v_vendor_spend_aging', label: 'Vendor Spend Aging' },
+            { value: 'v_open_items', label: 'Open Items' },
+            { value: 'v_future_plan', label: 'Future Plan' },
+            { value: 'v_to_car_closure', label: 'To CAR Closure' },
+          ];
+
+          const savedReports = await ApiNew.listReports();
+
+          content.innerHTML = `
+            <div class="row">
+              <div class="card" style="flex:1">
+                <h3>Saved Reports</h3>
+                <ul id="reportList" class="report-list">
+                  ${savedReports.map(r => `<li data-report-id="${r.id}"><strong>${r.name}</strong><br/><small>${r.owner}</small></li>`).join('') || '<li>(none yet)</li>'}
+                </ul>
+              </div>
+              <div class="card" style="flex:2">
+                <h3>Report Builder</h3>
+                <div class="field">
+                  ${labelFor('reportName','Name','Saved report name.')}
+                  <input class="input" id="reportName" placeholder="Quarterly actuals" />
+                </div>
+                <div class="field">
+                  ${labelFor('reportOwner','Owner','Displayed owner for saved report.')}
+                  <input class="input" id="reportOwner" placeholder="Analyst" />
+                </div>
+                <div class="field">
+                  ${labelFor('reportView','Base View','Underlying SQL view to query.')}
+                  <select id="reportView">${views.map(v => `<option value="${v.value}">${v.label}</option>`).join('')}</select>
+                </div>
+                <div class="row two">
+                  <div class="field">
+                    ${labelFor('reportDims','Dimensions (comma-separated)','e.g., funding_source,project')}
+                    <input class="input" id="reportDims" placeholder="funding_source,project" />
+                  </div>
+                  <div class="field">
+                    ${labelFor('reportMeasures','Measures','e.g., budget_usd,actual_usd')}
+                    <input class="input" id="reportMeasures" placeholder="budget_usd,commitment_usd,accrual_usd" />
+                  </div>
+                </div>
+                <div class="field">
+                  ${labelFor('reportFilters','Filters (JSON)','Example: {"funding_source_id":123}')}
+                  <textarea class="input" id="reportFilters" rows="3" placeholder='{"funding_source_id":123}'></textarea>
+                </div>
+                <div class="actions">
+                  <button id="runReportBtn">Run</button>
+                  <button id="saveReportBtn">Save</button>
+                </div>
+              </div>
+            </div>
+            <div id="reportResult" class="card"><em>Run or select a report to see data.</em></div>
+          `;
+
+          const reportList = document.getElementById('reportList');
+          const resultPanel = document.getElementById('reportResult');
+
+          function parseConfig(){
+            const cfg = {
+              view: document.getElementById('reportView').value,
+            };
+            const dims = document.getElementById('reportDims').value.split(',').map(v => v.trim()).filter(Boolean);
+            const measures = document.getElementById('reportMeasures').value.split(',').map(v => v.trim()).filter(Boolean);
+            if (dims.length) cfg.dimensions = dims;
+            if (measures.length) cfg.measures = measures;
+            const filters = document.getElementById('reportFilters').value.trim();
+            if (filters) {
+              try {
+                cfg.filters = JSON.parse(filters);
+              } catch (err) {
+                throw new Error('Invalid filters JSON');
+              }
+            }
+            return cfg;
+          }
+
+          async function runReport(config){
+            try {
+              const data = await ApiNew.runAdhocReport(config);
+              const rows = data.rows || [];
+              if (!rows.length) {
+                resultPanel.innerHTML = '<p>No rows returned.</p>';
+                return;
+              }
+              const columns = Object.keys(rows[0]).map(key => ({ key, label: key, format: (val) => (typeof val === 'number' ? fmtCurrency(val) : val) }));
+              resultPanel.innerHTML = card('Results', readOnlyTable(rows, columns));
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          reportList.querySelectorAll('li[data-report-id]').forEach(node => {
+            node.addEventListener('click', async () => {
+              const id = node.dataset.reportId;
+              const report = savedReports.find(r => String(r.id) === String(id));
+              if (!report) return;
+              document.getElementById('reportName').value = report.name;
+              document.getElementById('reportOwner').value = report.owner;
+              document.getElementById('reportView').value = report.json_config.view || views[0].value;
+              document.getElementById('reportDims').value = (report.json_config.dimensions || []).join(',');
+              document.getElementById('reportMeasures').value = (report.json_config.measures || []).join(',');
+              document.getElementById('reportFilters').value = report.json_config.filters ? JSON.stringify(report.json_config.filters) : '';
+              runReport(report.json_config);
+            });
+          });
+
+          document.getElementById('runReportBtn').onclick = async () => {
+            try {
+              const cfg = parseConfig();
+              await runReport(cfg);
+            } catch (err) {
+              showError(err);
+            }
+          };
+
+          document.getElementById('saveReportBtn').onclick = async () => {
+            const name = document.getElementById('reportName').value.trim();
+            const owner = document.getElementById('reportOwner').value.trim() || 'system';
+            if (!name) {
+              alert('Provide a name.');
+              return;
+            }
+            try {
+              const cfg = parseConfig();
+              await ApiNew.saveReport({ name, owner, json_config: cfg });
+              alert('Report saved. Reload tab to refresh list.');
+            } catch (err) {
+              showError(err);
+            }
+          };
+        }
+
+        async function renderFx(){
+          if (!FEATURES.FX_ADMIN) {
+            content.innerHTML = card('FX Rates', '<p>FX administration is disabled.</p>');
+            return;
+          }
+
+          async function loadRates(filters){
+            try {
+              const rates = await ApiNew.listFxRates(filters || {});
+              if (!rates.length) return '<p>No FX rates.</p>';
+              return `
+                <table class="table">
+                  <thead><tr><th>ID</th><th>Currency</th><th>Valid From</th><th>Valid To</th><th>Rate</th><th>Manual Override</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    ${rates.map(r => `<tr data-id="${r.id}">
+                      <td>${r.id}</td>
+                      <td>${r.quote_currency}</td>
+                      <td>${r.valid_from}</td>
+                      <td>${r.valid_to || '-'}</td>
+                      <td>${r.rate}</td>
+                      <td>${r.manual_override ? 'Yes' : 'No'}</td>
+                      <td>
+                        <button class="btn-edit-fx">Edit</button>
+                        <button class="btn-delete-fx">Delete</button>
+                      </td>
+                    </tr>`).join('')}
+                  </tbody>
+                </table>`;
+            } catch (err) {
+              showError(err);
+              return '<p>Error loading rates.</p>';
+            }
+          }
+
+          content.innerHTML = `
+            ${card('Add FX Rate', `
+              <div class="row four">
+                ${field('fx_quote', labelFor('fx_quote','Quote Currency','e.g., EUR')), input('fx_quote','EUR')}
+                ${field('fx_valid_from', labelFor('fx_valid_from','Valid From'), '<input type="date" class="input" name="fx_valid_from" />')}
+                ${field('fx_valid_to', labelFor('fx_valid_to','Valid To'), '<input type="date" class="input" name="fx_valid_to" />')}
+                ${field('fx_rate', labelFor('fx_rate','Rate'), input('fx_rate','1.10'))}
+              </div>
+              <div class="field">
+                <label><input type="checkbox" name="fx_override"/> Allow override (outside 0.5–2.0)</label>
+              </div>
+              <div class="actions"><button id="addFx">Add</button></div>
+            `)}
+            <div id="fxTable" class="card"><em>Loading...</em></div>
+          `;
+
+          const fxTable = document.getElementById('fxTable');
+
+          async function refresh(){
+            fxTable.innerHTML = '<em>Loading...</em>';
+            fxTable.innerHTML = await loadRates();
+            fxTable.querySelectorAll('.btn-edit-fx').forEach(btn => {
+              btn.addEventListener('click', async () => {
+                const row = btn.closest('tr');
+                const id = row.dataset.id;
+                const rate = prompt('Rate', row.children[4].textContent.trim());
+                const override = confirm('Allow manual override?');
+                if (!rate) return;
+                if (!override && (Number(rate) < 0.5 || Number(rate) > 2.0)) {
+                  alert('Rate outside safety bounds. Enable override if intentional.');
+                  return;
+                }
+                try {
+                  await ApiNew.updateFxRate(id, { rate: Number(rate), manual_override: override });
+                  refresh();
+                } catch (err) {
+                  showError(err);
+                }
+              });
+            });
+            fxTable.querySelectorAll('.btn-delete-fx').forEach(btn => {
+              btn.addEventListener('click', async () => {
+                const row = btn.closest('tr');
+                const id = row.dataset.id;
+                if (!confirm('Delete FX rate?')) return;
+                try {
+                  await ApiNew.deleteFxRate(id);
+                  refresh();
+                } catch (err) {
+                  showError(err);
+                }
+              });
+            });
+          }
+
+          document.getElementById('addFx').onclick = async () => {
+            const quote = content.querySelector('input[name=fx_quote]').value.trim().toUpperCase();
+            const validFrom = content.querySelector('input[name=fx_valid_from]').value;
+            const validTo = content.querySelector('input[name=fx_valid_to]').value || null;
+            const rate = Number(content.querySelector('input[name=fx_rate]').value);
+            const override = content.querySelector('input[name=fx_override]').checked;
+            if (!quote || !validFrom || !rate) {
+              alert('Quote currency, date, and rate required.');
+              return;
+            }
+            if (!override && (rate < 0.5 || rate > 2.0)) {
+              alert('Rate outside safety bounds. Enable override to proceed.');
+              return;
+            }
+            try {
+              await ApiNew.createFxRate({ quote_currency: quote, valid_from: validFrom, valid_to: validTo || undefined, rate, manual_override: override });
+              refresh();
+            } catch (err) {
+              showError(err);
+            }
+          };
+
+          refresh();
+        }
   
               await apiCreate('/api/entries', body);
               renderEntries();
@@ -451,36 +1169,48 @@
         // ---- Pivots & Health ----
         let chartInstance;
         async function renderPivots(){
-          const [portfolios, categories] = await Promise.all([apiList('/api/portfolios'), apiList('/api/categories')]);
-          const portfolioOpts = [{value:'',label:'(All Portfolios)'}].concat(portfolios.map(c=>({value:c.id,label:`${c.name}${c.fiscal_year ? ' • FY '+c.fiscal_year : ''}`})));
-          const catMap = mapBy(categories);
-  
+          if (!FEATURES.READ_FROM_VIEWS) {
+            content.innerHTML = card('Pivot & Health', '<p>View-backed analytics are disabled via feature flag.</p>');
+            return;
+          }
+          const [fundingSources, portfolios, projects, categories, vendors] = await Promise.all([
+            apiList('/api/funding-sources'),
+            apiList('/api/portfolios'),
+            apiList('/api/projects'),
+            apiList('/api/categories'),
+            apiList('/api/vendors'),
+          ]);
+          const fsById = mapBy(fundingSources);
+          const projectMap = mapBy(projects);
+          const categoryMap = mapBy(categories);
+          const vendorMap = mapBy(vendors);
+          const portfolioOpts = [{value:'',label:'(All Funding Sources)'}].concat(fundingSources.map(c=>({value:c.id,label:`${c.name}${c.closure_date ? ' • closes '+c.closure_date : ''}`})));
+
           const ui = document.createElement('div');
           ui.innerHTML = `
             <div class="card">
               <h3>Pivot & Health</h3>
               <div class="row three">
                 <div class="field">
-                  ${labelFor('scenario','Scenario','Actual = as charged today; Ideal = re-map mischarged entries to intended portfolios.')}
+                  ${labelFor('scenario','Scenario','Ledger-backed — ideal scenario pending future backfill.')}
                   <select name="scenario">
                     <option value="actual">Actual</option>
-                    <option value="ideal">Ideal</option>
                   </select>
                 </div>
                 <div class="field">
                   ${labelFor('by','Pivot By','Choose grouping for the pivot table below.')}
                   <select name="by">
-                    <option value="">Detailed (portfolio+project+category+vendor+kind)</option>
-                    <option value="portfolio">By Portfolio</option>
+                    <option value="">Detailed (funding source • project • category • vendor)</option>
+                    <option value="portfolio">By Funding Source</option>
                     <option value="project">By Project</option>
                     <option value="group">By Project Group</option>
                     <option value="category">By Category</option>
                     <option value="vendor">By Vendor</option>
-                    <option value="kind">By Kind</option>
+                    <option value="state">By State (Forecast/Commitment/etc)</option>
                   </select>
                 </div>
                 <div class="field">
-                  ${labelFor('portfolioFilter','Portfolio (for Category Health)','Pick a portfolio to see category-level health.')}
+                  ${labelFor('portfolioFilter','Funding Source Filter','Pick a funding source to narrow results and show category health.')}
                   ${select('portfolioFilter', portfolioOpts)}
                 </div>
               </div>
@@ -490,53 +1220,180 @@
             <div id="health"></div>
           `;
           content.innerHTML = ui.outerHTML;
-  
+
+          const groupMap = {
+            '': 'funding_source,project,category,vendor,currency',
+            portfolio: 'funding_source',
+            project: 'project',
+            group: 'project',
+            category: 'category',
+            vendor: 'vendor',
+            state: 'state',
+          };
+
+          function describeRow(row, by) {
+            const parts = [];
+            if (row.funding_source_id !== undefined && row.funding_source_id !== null) {
+              const fs = fsById[row.funding_source_id];
+              parts.push(fs ? fs.name : `Funding ${row.funding_source_id}`);
+            }
+            if ((by === '' || by === 'project' || by === 'group') && row.project_id) {
+              const proj = projectMap[row.project_id];
+              parts.push(proj ? proj.name : `Project ${row.project_id}`);
+              if (by === 'group' && proj && proj.group_id) {
+                parts.push(`Group ${proj.group_id}`);
+              }
+            }
+            if ((by === '' || by === 'category') && row.category_id) {
+              const cat = categoryMap[row.category_id];
+              parts.push(cat ? catPath(cat, categoryMap) : `Category ${row.category_id}`);
+            }
+            if ((by === '' || by === 'vendor') && row.vendor_id) {
+              const vendor = vendorMap[row.vendor_id];
+              parts.push(vendor ? vendor.name : `Vendor ${row.vendor_id}`);
+            }
+            if (by === 'state' && row.state) parts.push(row.state);
+            return parts.length ? parts.join(' • ') : 'Total';
+          }
+
           async function draw(){
             try {
-              const scenario = content.querySelector('select[name=scenario]').value || 'actual';
               const by = content.querySelector('select[name=by]').value;
               const portfolioFilter = content.querySelector('select[name=portfolioFilter]').value;
-  
-              // Pivot
-              const rows = await apiList(`/api/pivot/summary${by ? '?by=' + by : ''}${by ? '&' : '?'}scenario=${scenario}`);
-              document.getElementById('pv').innerHTML = card('Pivot Summary', table(rows, Object.keys(rows[0] || {})));
-  
-              // Chart totals
-              const totals = {};
-              rows.forEach(r => {
-                const label = by ? Object.values(r)[0] : r.kind;
-                const k = String(label ?? 'n/a');
-                totals[k] = (totals[k]||0) + (r.total||0);
+              const groupParam = groupMap[by] || groupMap[''];
+              const baseParams = { group_by: groupParam };
+              const filterId = portfolioFilter ? Number(portfolioFilter) : undefined;
+              if (filterId) baseParams.funding_source_id = filterId;
+
+              const portfolioParams = filterId ? { group_by: 'funding_source', funding_source_id: filterId } : { group_by: 'funding_source' };
+              const categoryParams = filterId ? { group_by: 'category', funding_source_id: filterId } : null;
+              const openParams = filterId ? { funding_source_id: filterId } : {};
+              const closureParams = filterId ? { funding_source_id: filterId } : {};
+
+              const [pivotData, summaryData, openData, closureData, categoryData] = await Promise.all([
+                ApiNew.getBudgetCommitActual(baseParams),
+                ApiNew.getBudgetCommitActual(portfolioParams),
+                ApiNew.getOpenCommitments(openParams),
+                ApiNew.getToCarClosure(closureParams),
+                categoryParams ? ApiNew.getBudgetCommitActual(categoryParams) : Promise.resolve([]),
+              ]);
+
+              const pivotRows = pivotData.map(row => {
+                const actual = Number(row.accrual_usd || 0) + Number(row.cash_usd || 0);
+                return {
+                  label: describeRow(row, by || ''),
+                  budget_usd: Number(row.budget_usd || 0),
+                  commitment_usd: Number(row.commitment_usd || 0),
+                  accrual_usd: Number(row.accrual_usd || 0),
+                  cash_usd: Number(row.cash_usd || 0),
+                  open_commitment_usd: Number(row.open_commitment_usd || 0),
+                  variance_usd: Number(row.variance_usd || 0),
+                  variance_pct: row.variance_pct,
+                  actual_usd: actual,
+                };
               });
-              const labels = Object.keys(totals), data = Object.values(totals);
+
+              const pivotColumns = [
+                { key: 'label', label: 'Grouping' },
+                { key: 'budget_usd', label: 'Budget (USD)', format: fmtCurrency },
+                { key: 'commitment_usd', label: 'Commitment (USD)', format: fmtCurrency },
+                { key: 'accrual_usd', label: 'Accrual (USD)', format: fmtCurrency },
+                { key: 'cash_usd', label: 'Cash (USD)', format: fmtCurrency },
+                { key: 'open_commitment_usd', label: 'Open (USD)', format: fmtCurrency },
+                { key: 'variance_usd', label: 'Variance (USD)', format: fmtCurrency },
+                { key: 'variance_pct', label: 'Variance %', format: (v) => v === null || v === undefined ? '-' : `${v.toFixed(2)}%` },
+              ];
+              document.getElementById('pv').innerHTML = card('Pivot Summary', readOnlyTable(pivotRows, pivotColumns));
+
+              const labels = pivotRows.map(r => r.label);
+              const values = pivotRows.map(r => r.actual_usd);
               const ctx = document.getElementById('chart');
               if(chartInstance) chartInstance.destroy();
-              chartInstance = new Chart(ctx, { type: 'bar', data: { labels, datasets: [{ label: 'Totals', data }] }, options: { responsive:true } });
-  
-              // Health by portfolio
-              const healthPortfolio = await apiList(`/api/status/health?level=portfolio&scenario=${scenario}`);
-              const portfolioRows = healthPortfolio.map(h => {
-                const portfolio = portfolios.find(p=>p.id === h.portfolio_id);
-                const name = portfolio ? `${portfolio.name}${portfolio.fiscal_year? ' • FY '+portfolio.fiscal_year:''}` : h.portfolio_id;
-                return { name, budget: h.budget || 0, actual: h.actual || 0, variance: (h.actual||0)-(h.budget||0), variance_pct: h.variance_pct ?? null, status: h.status };
+              chartInstance = new Chart(ctx, { type: 'bar', data: { labels, datasets: [{ label: 'Actual (Accrual + Cash)', data: values, backgroundColor: '#4864d6' }] }, options: { responsive:true } });
+
+              const portfolioSummary = summaryData.reduce((acc, row) => {
+                const fsId = row.funding_source_id;
+                if (!fsId) return acc;
+                const actual = Number(row.accrual_usd || 0) + Number(row.cash_usd || 0);
+                acc[fsId] = {
+                  funding_source_id: fsId,
+                  name: fsById[fsId] ? fsById[fsId].name : `Funding ${fsId}`,
+                  budget: Number(row.budget_usd || 0),
+                  actual,
+                  variance: Number(row.variance_usd || 0),
+                  variance_pct: row.variance_pct,
+                };
+                return acc;
+              }, {});
+
+              openData.forEach(row => {
+                const fsId = row.funding_source_id;
+                if (!fsId || !portfolioSummary[fsId]) return;
+                portfolioSummary[fsId].open = Number(row.open_commitment_usd || row.commitment_usd || 0);
               });
-              const portfolioTable = table(portfolioRows, ['name','budget','actual','variance','variance_pct','status']);
-              // Health by Category (if chosen Portfolio)
-              let catTable = '<div class="card"><em>Select a portfolio above to see category health.</em></div>';
-              if (portfolioFilter) {
-                const healthCat = await apiList(`/api/status/health?level=category&portfolio_id=${portfolioFilter}&scenario=${scenario}`);
-                const catRows = healthCat.map(h => {
-                  const path = catMap[h.category_id] ? catPath(catMap[h.category_id], catMap) : '(none)';
-                  return { category: path, budget: h.budget||0, actual: h.actual||0, variance: (h.actual||0)-(h.budget||0), variance_pct: h.variance_pct ?? null, status: h.status };
+
+              closureData.forEach(row => {
+                const fsId = row.funding_source_id;
+                if (!fsId || !portfolioSummary[fsId]) return;
+                portfolioSummary[fsId].closure_date = row.closure_date || null;
+              });
+
+              const portfolioRows = Object.values(portfolioSummary).map(row => {
+                return {
+                  name: row.name,
+                  budget: row.budget,
+                  actual: row.actual,
+                  variance: row.variance,
+                  variance_pct: row.variance_pct,
+                  open: row.open || 0,
+                  closure_date: row.closure_date || '-',
+                  status: computeStatus(row.budget, row.actual),
+                };
+              });
+
+              const portfolioColumns = [
+                { key: 'name', label: 'Funding Source' },
+                { key: 'budget', label: 'Budget (USD)', format: fmtCurrency },
+                { key: 'actual', label: 'Actual (USD)', format: fmtCurrency },
+                { key: 'open', label: 'Open Commit (USD)', format: fmtCurrency },
+                { key: 'variance', label: 'Variance (USD)', format: fmtCurrency },
+                { key: 'variance_pct', label: 'Variance %', format: (v) => v === null || v === undefined ? '-' : `${v.toFixed(2)}%` },
+                { key: 'status', label: 'Status' },
+                { key: 'closure_date', label: 'Closure Date' },
+              ];
+
+              let healthHtml = card('Health — By Funding Source', readOnlyTable(portfolioRows, portfolioColumns));
+
+              if (filterId && categoryData.length) {
+                const categoryRows = categoryData.map(row => {
+                  const actual = Number(row.accrual_usd || 0) + Number(row.cash_usd || 0);
+                  const cat = categoryMap[row.category_id];
+                  return {
+                    category: cat ? catPath(cat, categoryMap) : `Category ${row.category_id}`,
+                    budget: Number(row.budget_usd || 0),
+                    actual,
+                    variance: Number(row.variance_usd || 0),
+                    variance_pct: row.variance_pct,
+                    status: computeStatus(row.budget_usd, actual),
+                  };
                 });
-                catTable = table(catRows, ['category','budget','actual','variance','variance_pct','status']);
-                catTable = card('Health — By Category (selected portfolio)', catTable);
+                const categoryColumns = [
+                  { key: 'category', label: 'Category' },
+                  { key: 'budget', label: 'Budget (USD)', format: fmtCurrency },
+                  { key: 'actual', label: 'Actual (USD)', format: fmtCurrency },
+                  { key: 'variance', label: 'Variance (USD)', format: fmtCurrency },
+                  { key: 'variance_pct', label: 'Variance %', format: (v) => v === null || v === undefined ? '-' : `${v.toFixed(2)}%` },
+                  { key: 'status', label: 'Status' },
+                ];
+                healthHtml += card('Health — By Category (selected funding source)', readOnlyTable(categoryRows, categoryColumns));
+              } else {
+                healthHtml += card('Health — By Category', '<div><em>Select a funding source above.</em></div>');
               }
-              document.getElementById('health').innerHTML = card('Health — By Portfolio', portfolioTable) + catTable;
+
+              document.getElementById('health').innerHTML = healthHtml;
             } catch (e) { showError(e); }
           }
-  
-          content.querySelector('select[name=scenario]').onchange = draw;
+
           content.querySelector('select[name=by]').onchange = draw;
           content.querySelector('select[name=portfolioFilter]').onchange = draw;
           draw();
@@ -572,6 +1429,10 @@
             if(tab==='vendors') return renderVendors();
             if(tab==='entries') return renderEntries();
             if(tab==='pivots') return renderPivots();
+            if(tab==='payments') return renderPayments();
+            if(tab==='deliverables') return renderDeliverables();
+            if(tab==='reports') return renderReports();
+            if(tab==='fx') return renderFx();
             if(tab==='tags') return renderTags();
             content.innerHTML = card('Welcome','Pick a tab above to get started.');
           } catch (e) { showError(e); }
@@ -585,7 +1446,7 @@
           renderActive();
         });
   
-        const firstTab = nav.querySelector('button[data-tab]');
+        const firstTab = Array.from(nav.querySelectorAll('button[data-tab]')).find(btn => btn.style.display !== 'none');
         if (firstTab && !document.querySelector('nav button.active')) firstTab.classList.add('active');
         renderActive();
 
