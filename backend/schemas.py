@@ -6,6 +6,11 @@ class PortfolioIn(BaseModel):
     name: str
     fiscal_year: Optional[str] = None
     owner: Optional[str] = None
+    type: Optional[str] = "COST_CENTER"
+    car_code: Optional[str] = None
+    cc_code: Optional[str] = None
+    closure_date: Optional[str] = None
+    is_temporary: Optional[bool] = False
 
 class PortfolioOut(PortfolioIn):
     id: int

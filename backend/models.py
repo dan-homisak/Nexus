@@ -8,6 +8,11 @@ class Portfolio(Base):
     name = Column(String, unique=True, nullable=False)
     fiscal_year = Column(String)
     owner = Column(String)
+    type = Column(String, default="COST_CENTER")
+    car_code = Column(String)
+    cc_code = Column(String)
+    closure_date = Column(Date)
+    is_temporary = Column(Boolean, default=False)
     projects = relationship("Project", back_populates="portfolio", cascade="all, delete")
 
 class ProjectGroup(Base):

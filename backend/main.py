@@ -8,7 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, and_, case
 from .db import Base, engine, get_db
-from . import models, schemas
+from . import models, schemas, models_finance  # noqa: F401 - ensure models are registered
+from .routes_finance import router as finance_router
 from .csv_io import export_to_csv, import_latest_csv
 
 app = FastAPI()
@@ -16,6 +17,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+
+app.include_router(finance_router)
 
 def _shutdown():
     # slight delay so the HTTP response returns cleanly
@@ -62,14 +65,20 @@ def list_portfolios(db: Session = Depends(get_db)):
 
 @app.post("/api/portfolios")
 def create_portfolio(portfolio: schemas.PortfolioIn, db: Session = Depends(get_db)):
-    m = models.Portfolio(**portfolio.model_dump())
+    payload = portfolio.model_dump()
+    if payload.get("closure_date"):
+        payload["closure_date"] = DateType.fromisoformat(payload["closure_date"])
+    m = models.Portfolio(**payload)
     db.add(m); db.commit(); db.refresh(m)
     return m
 
 @app.put("/api/portfolios/{portfolio_id}")
 def update_portfolio(portfolio_id: int, portfolio: schemas.PortfolioIn, db: Session = Depends(get_db)):
     m = get_or_404(db, models.Portfolio, portfolio_id)
-    for k, v in portfolio.model_dump().items(): setattr(m, k, v)
+    for k, v in portfolio.model_dump().items():
+        if k == "closure_date" and v:
+            v = DateType.fromisoformat(v)
+        setattr(m, k, v)
     db.commit(); db.refresh(m)
     return m
 
