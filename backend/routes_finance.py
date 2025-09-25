@@ -850,7 +850,7 @@ def list_payment_schedules(
 ):
     stmt = select(models_finance.PaymentSchedule).options(
         selectinload(models_finance.PaymentSchedule.purchase_order),
-        selectinload(models_finance.PaymentSchedule.invoice).selectinload(models_finance.Invoice.purchase_order),
+        selectinload(models_finance.PaymentSchedule.invoice),
     )
     if po_id is not None:
         stmt = stmt.where(models_finance.PaymentSchedule.purchase_order_id == po_id)

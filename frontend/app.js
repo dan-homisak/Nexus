@@ -1160,12 +1160,6 @@
           refresh();
         }
   
-              await apiCreate('/api/entries', body);
-              renderEntries();
-            } catch(e) { showError(e); }
-          };
-        }
-  
         // ---- Pivots & Health ----
         let chartInstance;
         async function renderPivots(){
