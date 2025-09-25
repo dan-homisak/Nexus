@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FundingSourceIn(BaseModel):
@@ -155,6 +155,49 @@ class PaymentScheduleOut(PaymentScheduleIn):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PaymentScheduleUpdateIn(BaseModel):
+    percent: Optional[Decimal] = None
+    amount: Optional[Decimal] = None
+    due_date: Optional[date] = None
+    status: Optional[str] = None
+
+
+class PaymentScheduleSplitIn(BaseModel):
+    percent: Optional[Decimal] = None
+    amount: Optional[Decimal] = None
+    due_date: Optional[date] = None
+
+    @field_validator("percent", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v):
+        if v == "":
+            return None
+        return v
+
+
+class PaymentScheduleGenerateV2Request(BaseModel):
+    invoice_id: Optional[int] = Field(default=None, alias="invoice_id")
+    po_id: Optional[int] = Field(default=None, alias="po_id")
+    rule: Literal["NET_N", "NET_0", "CUSTOM"] = "NET_N"
+    net_days: Optional[int] = 60
+    splits: List[PaymentScheduleSplitIn] = Field(default_factory=list)
+    by: str = "system"
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class MilestoneUpdateIn(BaseModel):
+    actual_date: Optional[date] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class LotCreateIn(BaseModel):
+    lot_qty: Decimal
+    lot_identifier: Optional[str] = None
+    notes: Optional[str] = None
+
+
 class FxRateIn(BaseModel):
     quote_currency: str
     valid_from: date
@@ -166,6 +209,37 @@ class FxRateIn(BaseModel):
 class FxRateOut(FxRateIn):
     id: int
     base_currency: str
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FxRateUpdateIn(BaseModel):
+    quote_currency: Optional[str] = None
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+    rate: Optional[Decimal] = None
+    manual_override: Optional[bool] = None
+
+
+class CheckpointTypeOut(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DeliverableLotOut(BaseModel):
+    id: int
+    po_line_id: int
+    purchase_order_id: int
+    po_number: Optional[str] = None
+    lot_qty: Decimal
+    lot_identifier: Optional[str] = None
+    notes: Optional[str] = None
+    is_late: bool = False
+    milestones: List[MilestoneOut] = Field(default_factory=list)
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -187,6 +261,10 @@ class SavedReportResult(BaseModel):
     generated_at: datetime
 
 
+class ReportRunIn(BaseModel):
+    json_config: dict
+
+
 class ReallocateRequest(BaseModel):
     transaction_id: str
     target_funding_source_id: int
@@ -203,5 +281,7 @@ class PaymentScheduleGenerateRequest(BaseModel):
 
 class DeliverableTemplateApplyRequest(BaseModel):
     purchase_order_id: int
-    lot_quantities: List[Decimal]
+    lot_quantities: List[Decimal] = Field(default_factory=list)
     checkpoint_type_ids: List[int]
+    po_line_ids: Optional[List[int]] = None
+    by: str = "system"

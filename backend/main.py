@@ -1,6 +1,7 @@
-﻿from pathlib import Path
+from pathlib import Path
 from datetime import date as DateType
 import os, time
+from typing import Optional
 from fastapi import BackgroundTasks
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -326,14 +327,14 @@ def delete_project_group(pg_id: int, db: Session = Depends(get_db)):
 # --- Pivots: generic summary (unchanged) ---
 @app.get("/api/pivot/summary")
 def pivot_summary(
-    by: str | None = None,
+    by: Optional[str] = None,
     scenario: str = "actual",  # actual | ideal
-    portfolio_id: int | None = None,
-    project_id: int | None = None,
-    group_id: int | None = None,
-    category_id: int | None = None,
-    vendor_id: int | None = None,
-    kind: str | None = None,
+    portfolio_id: Optional[int] = None,
+    project_id: Optional[int] = None,
+    group_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    vendor_id: Optional[int] = None,
+    kind: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     eff_portfolio = case(
@@ -398,7 +399,7 @@ def pivot_summary(
 def health(
     level: str,                     # 'portfolio' or 'category'
     scenario: str = "actual",       # 'actual' or 'ideal'
-    portfolio_id: int | None = None,      # required for level='category'
+    portfolio_id: Optional[int] = None,      # required for level='category'
     db: Session = Depends(get_db)
 ):
     """

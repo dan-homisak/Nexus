@@ -6,8 +6,9 @@ from decimal import Decimal
 from pathlib import Path
 import sys
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -15,12 +16,33 @@ if str(ROOT) not in sys.path:
 
 from backend.db import Base
 from backend import models, models_finance  # noqa: F401 - ensure legacy tables load
+from backend.main import app, get_db
 
 
 def build_session() -> Session:
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(bind=engine)
     return Session(bind=engine)
+
+
+def make_test_client():
+    engine = create_engine(
+        "sqlite:///:memory:", future=True, connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+    def override_get_db():
+        session = TestingSessionLocal()
+        try:
+            yield session
+            session.commit()
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    return client, TestingSessionLocal, engine
 
 
 def test_payment_schedule_default_generates_due_date():
@@ -79,3 +101,175 @@ def test_fx_lookup_respects_bounds():
     found = models_finance.FxRate.lookup(session, dt.date(2024, 1, 10), "EUR", allow_stale=True)
     assert found.rate == Decimal("1.2")
     session.close()
+
+
+def test_analytics_budget_endpoint():
+    client, SessionLocal, _ = make_test_client()
+    with SessionLocal() as session:
+        fs = models_finance.FundingSource(name="FS", type="COST_CENTER")
+        session.add(fs)
+        session.flush()
+        txn = models_finance.Transaction(
+            funding_source_id=fs.id,
+            state="FORECAST",
+            source_type="PO",
+            amount_txn=Decimal("100"),
+            currency="USD",
+            fx_rate_to_usd=Decimal("1.0"),
+            amount_usd=Decimal("100"),
+            txn_date=dt.date.today(),
+        )
+        session.add(txn)
+        session.commit()
+
+    resp = client.get("/api/views/budget-commit-actual")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data and "budget_usd" in data[0]
+
+
+def test_payment_schedule_generate_creates_default():
+    client, SessionLocal, _ = make_test_client()
+    with SessionLocal() as session:
+        fs = models_finance.FundingSource(name="FS", type="COST_CENTER")
+        session.add(fs)
+        session.flush()
+        po = models_finance.PurchaseOrder(
+            funding_source=fs,
+            po_number="PO-100",
+            currency="USD",
+            fx_rate_to_usd=Decimal("1.0"),
+            total_amount=Decimal("100"),
+            amount_usd=Decimal("100"),
+        )
+        session.add(po)
+        session.commit()
+        po_id = po.id
+
+    resp = client.post(
+        "/api/payment-schedules/generate",
+        json={"po_id": po_id, "rule": "NET_N", "net_days": 60},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    with SessionLocal() as session:
+        event = session.execute(
+            select(models_finance.Event).where(models_finance.Event.entity_type == "payment_schedule")
+        ).scalar_one_or_none()
+        assert event is not None
+
+
+def test_payment_schedule_update_rejects_paid_changes():
+    client, SessionLocal, _ = make_test_client()
+    with SessionLocal() as session:
+        schedule = models_finance.PaymentSchedule(
+            percent=Decimal("1"),
+            amount=Decimal("50"),
+            due_date_rule="NET_N",
+            status="PAID",
+            paid_transaction_id="txn",
+        )
+        session.add(schedule)
+        session.commit()
+        schedule_id = schedule.id
+
+    resp = client.put(f"/api/payment-schedules/{schedule_id}", json={"amount": 20})
+    assert resp.status_code == 400
+
+
+def test_deliverable_template_apply_and_milestone_update():
+    client, SessionLocal, _ = make_test_client()
+    with SessionLocal() as session:
+        fs = models_finance.FundingSource(name="FS", type="COST_CENTER")
+        checkpoint = models_finance.CheckpointType(code="ship", name="Ship")
+        session.add_all([fs, checkpoint])
+        session.flush()
+        po = models_finance.PurchaseOrder(
+            funding_source=fs,
+            po_number="PO-200",
+            currency="USD",
+            fx_rate_to_usd=Decimal("1.0"),
+            total_amount=Decimal("10"),
+            amount_usd=Decimal("10"),
+        )
+        session.add(po)
+        session.flush()
+        line = models_finance.POLine(
+            purchase_order=po,
+            description="Widget",
+            quantity=Decimal("10"),
+            amount=Decimal("10"),
+        )
+        session.add(line)
+        session.commit()
+        po_id = po.id
+        line_id = line.id
+        checkpoint_id = checkpoint.id
+
+    resp = client.post(
+        "/api/deliverables/template/apply",
+        json={
+            "purchase_order_id": po_id,
+            "po_line_ids": [line_id],
+            "lot_quantities": ["5"],
+            "checkpoint_type_ids": [checkpoint_id],
+        },
+    )
+    assert resp.status_code == 200
+    lots = resp.json()
+    assert lots and lots[0]["milestones"]
+    milestone_id = lots[0]["milestones"][0]["id"]
+
+    update_resp = client.put(
+        f"/api/milestones/{milestone_id}",
+        json={"actual_date": dt.date.today().isoformat()},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["actual_date"] == dt.date.today().isoformat()
+
+
+def test_fx_rate_bounds_and_override():
+    client, SessionLocal, _ = make_test_client()
+    resp = client.post(
+        "/api/fx-rates",
+        json={"quote_currency": "EUR", "valid_from": "2024-01-01", "rate": 1.1},
+    )
+    assert resp.status_code == 200
+    rate_id = resp.json()["id"]
+
+    bad_update = client.put(f"/api/fx-rates/{rate_id}", json={"rate": 3})
+    assert bad_update.status_code == 400
+
+    ok_update = client.put(
+        f"/api/fx-rates/{rate_id}", json={"rate": 3, "manual_override": True}
+    )
+    assert ok_update.status_code == 200
+
+
+def test_report_run_adhoc():
+    client, SessionLocal, _ = make_test_client()
+    with SessionLocal() as session:
+        fs = models_finance.FundingSource(name="FS", type="COST_CENTER")
+        session.add(fs)
+        session.flush()
+        txn = models_finance.Transaction(
+            funding_source_id=fs.id,
+            state="FORECAST",
+            source_type="PO",
+            amount_txn=Decimal("50"),
+            currency="USD",
+            fx_rate_to_usd=Decimal("1.0"),
+            amount_usd=Decimal("50"),
+            txn_date=dt.date.today(),
+        )
+        session.add(txn)
+        session.commit()
+
+    resp = client.post(
+        "/api/report/run",
+        json={"json_config": {"view": "v_budget_commit_actual"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["rows"]
