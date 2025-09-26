@@ -44,22 +44,614 @@
   
         // ---- UI helpers ----
         const escapeTip = (s) => String(s).replace(/"/g, '&quot;');
+        const escapeHtml = (s = '') => String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
         const labelFor = (name, text, tip) => {
           const tipHtml = tip ? `<span class="info" data-tip="${escapeTip(tip)}">i</span>` : '';
           return `<label for="${name}">${text}${tipHtml}</label>`;
         };
         const field = (name, labelHtml, inputHtml) => `<div class="field">${labelHtml}${inputHtml}</div>`;
         const input = (name, placeholder='') => `<input class="input" name="${name}" placeholder="${placeholder}"/>`;
-        const select = (name, opts) => `<select name="${name}">${opts.map(o=>`<option value="${o.value}">${o.label}</option>`).join('')}</select>`;
+        const dropdownRegistry = new Map();
+        let dropdownSeq = 0;
+        const select = (name, opts, config = {}) => {
+          const id = `dd-${++dropdownSeq}`;
+          const options = (opts || []).map(opt => ({
+            value: opt.value === undefined || opt.value === null ? '' : String(opt.value),
+            label: opt.label === undefined || opt.label === null ? '' : String(opt.label),
+            raw: opt.raw !== undefined ? opt.raw : opt,
+          }));
+          dropdownRegistry.set(id, { name, options, config });
+          const optionsHtml = options.map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join('');
+          const placeholder = config.placeholder || 'Search…';
+          return `
+            <div class="dropdown" data-dropdown-id="${id}">
+              <div class="dropdown-box">
+                <input id="${name}-${id}" class="dropdown-input" data-dropdown-input placeholder="${escapeHtml(placeholder)}" autocomplete="off" />
+                <button type="button" class="dropdown-toggle" data-dropdown-toggle aria-label="Toggle options">▾</button>
+              </div>
+              <div class="dropdown-menu" data-dropdown-menu role="listbox"></div>
+              <select id="${name}" name="${name}" data-dropdown-native style="display:none">${optionsHtml}</select>
+            </div>`;
+        };
+
+        const DROPDOWN_DEFAULTS = {
+          allowCreate: true,
+          allowEdit: true,
+          allowDelete: true,
+          matcher: (option, needle) => option.label.toLowerCase().includes(needle),
+          sorter: (a, b) => a.label.localeCompare(b.label),
+        };
+
+        const dropdownInstances = new Set();
+        const dropdownGroups = new Map();
+
+        const registerDropdownState = (state) => {
+          dropdownInstances.add(state);
+          if (state.config && state.config.key) {
+            if (!dropdownGroups.has(state.config.key)) dropdownGroups.set(state.config.key, new Set());
+            dropdownGroups.get(state.config.key).add(state);
+          }
+        };
+
+        const cloneOption = (opt) => ({ value: opt.value, label: opt.label, raw: opt.raw });
+
+        const propagateAdd = (source, option) => {
+          const key = source.config?.key;
+          if (!key) return;
+          const peers = dropdownGroups.get(key);
+          if (!peers) return;
+          peers.forEach(peer => {
+            if (peer === source) return;
+            if (peer.optionMap.has(option.value)) return;
+            const copy = cloneOption(option);
+            peer.options.push(copy);
+            peer.optionMap.set(copy.value, copy);
+            peer.selectEl.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(copy.value)}">${escapeHtml(copy.label)}</option>`);
+            peer.filtered = peer.options.slice().sort(peer.config.sorter);
+            if (peer.open) {
+              peer.filterOptions(peer.inputEl.value);
+            }
+          });
+        };
+
+        const propagateUpdate = (source, option) => {
+          const key = source.config?.key;
+          if (!key) return;
+          const peers = dropdownGroups.get(key);
+          if (!peers) return;
+          peers.forEach(peer => {
+            if (peer === source) return;
+            const target = peer.optionMap.get(option.value);
+            if (!target) return;
+            target.label = option.label;
+            target.raw = option.raw;
+            [...peer.selectEl.options].forEach(o => {
+              if (o.value === option.value) o.textContent = option.label;
+            });
+            if (peer.selected && peer.selected.value === option.value) {
+              peer.inputEl.value = option.label;
+            }
+            peer.filtered = peer.options.slice().sort(peer.config.sorter);
+            if (peer.open) peer.filterOptions(peer.inputEl.value);
+          });
+        };
+
+        const propagateRemove = (source, option) => {
+          const key = source.config?.key;
+          if (!key) return;
+          const peers = dropdownGroups.get(key);
+          if (!peers) return;
+          peers.forEach(peer => {
+            if (peer === source) return;
+            peer.options = peer.options.filter(o => o.value !== option.value);
+            peer.optionMap.delete(option.value);
+            [...peer.selectEl.options].forEach(o => { if (o.value === option.value) o.remove(); });
+            if (peer.selected && peer.selected.value === option.value) {
+              peer.selected = null;
+              peer.selectEl.value = '';
+              peer.inputEl.value = '';
+            }
+            peer.filtered = peer.options.slice().sort(peer.config.sorter);
+            if (peer.open) peer.filterOptions(peer.inputEl.value);
+          });
+        };
+
+        function initializeDropdowns(root) {
+          root.querySelectorAll('[data-dropdown-id]').forEach(wrapper => {
+            if (wrapper.dataset.dropdownReady) return;
+            const id = wrapper.dataset.dropdownId;
+            const meta = dropdownRegistry.get(id);
+            if (!meta) return;
+            dropdownRegistry.delete(id);
+            wrapper.dataset.dropdownReady = '1';
+
+            const selectEl = wrapper.querySelector('select[data-dropdown-native]');
+            const inputEl = wrapper.querySelector('[data-dropdown-input]');
+            const menuEl = wrapper.querySelector('[data-dropdown-menu]');
+            const toggleEl = wrapper.querySelector('[data-dropdown-toggle]');
+            if (!selectEl || !inputEl || !menuEl) return;
+
+            const rawConfig = meta.config || {};
+            const config = Object.assign({}, DROPDOWN_DEFAULTS, rawConfig);
+            config.allowCreate = !!config.create && config.allowCreate !== false;
+            config.allowEdit = !!config.edit && config.allowEdit !== false;
+            config.allowDelete = !!config.remove && config.allowDelete !== false;
+            config.prefill = rawConfig.prefill !== false;
+            const options = Array.isArray(meta.options) ? meta.options.slice() : [];
+            const optionMap = new Map(options.map(opt => [opt.value, opt]));
+
+            if (!config.allowEdit) wrapper.classList.add('dropdown-no-edit');
+            if (!config.allowDelete) wrapper.classList.add('dropdown-no-delete');
+
+            // ensure native select reflects provided options
+            selectEl.innerHTML = options.map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join('');
+
+            const state = {
+              wrapper,
+              inputEl,
+              menuEl,
+              selectEl,
+              toggleEl,
+              config,
+              options,
+              optionMap,
+              filtered: options.slice().sort(config.sorter),
+              open: false,
+              highlightIndex: -1,
+              selected: null,
+              showSelection: config.prefill,
+            };
+
+            state.filterOptions = () => {};
+            state.openMenu = () => {};
+            state.closeMenu = () => {};
+            state.renderMenu = () => {};
+            state.chooseOption = () => {};
+
+            registerDropdownState(state);
+
+            const syncSelectedFromSelect = () => {
+              const currentValue = selectEl.value;
+              const option = optionMap.get(currentValue) || null;
+              state.selected = option;
+              if (option && state.showSelection) {
+                inputEl.value = option.label;
+              } else if (!option) {
+                inputEl.value = '';
+              } else if (!state.showSelection) {
+                inputEl.value = '';
+              }
+            };
+
+            selectEl.addEventListener('change', syncSelectedFromSelect);
+            wrapper.__dropdown = state;
+            selectEl.__dropdown = state;
+
+            state.renderMenu = () => {
+              menuEl.innerHTML = '';
+              if (!state.filtered.length) {
+                const empty = document.createElement('div');
+                empty.className = 'dropdown-empty';
+                empty.textContent = 'No matches';
+                menuEl.appendChild(empty);
+                state.highlightIndex = -1;
+                return;
+              }
+
+              state.filtered.forEach((opt, idx) => {
+                const item = document.createElement('div');
+                item.className = 'dropdown-item';
+                item.dataset.value = opt.value;
+                item.setAttribute('role', 'option');
+
+                const labelSpan = document.createElement('span');
+                labelSpan.className = 'dropdown-label';
+                labelSpan.textContent = opt.label;
+                item.appendChild(labelSpan);
+
+                const allowModify = opt.value !== '' && opt.value !== null;
+
+                if (config.allowEdit && allowModify) {
+                  const editBtn = document.createElement('button');
+                  editBtn.type = 'button';
+                  editBtn.className = 'dropdown-action dropdown-edit';
+                  editBtn.title = 'Edit';
+                  editBtn.dataset.action = 'edit';
+                  editBtn.textContent = '✎';
+                  item.appendChild(editBtn);
+                }
+
+                if (config.allowDelete && allowModify) {
+                  const deleteBtn = document.createElement('button');
+                  deleteBtn.type = 'button';
+                  deleteBtn.className = 'dropdown-action dropdown-delete';
+                  deleteBtn.title = 'Delete';
+                  deleteBtn.dataset.action = 'delete';
+                  deleteBtn.textContent = '×';
+                  item.appendChild(deleteBtn);
+                }
+
+                item.addEventListener('mousedown', (evt) => {
+                  evt.preventDefault();
+                  const action = evt.target.dataset.action;
+                  if (action === 'edit') {
+                    handleEdit(opt);
+                    return;
+                  }
+                  if (action === 'delete') {
+                    handleDelete(opt);
+                    return;
+                  }
+                  state.chooseOption(opt);
+                });
+
+                if (idx === state.highlightIndex) {
+                  item.classList.add('highlight');
+                }
+
+                menuEl.appendChild(item);
+              });
+            };
+
+            state.openMenu = () => {
+              if (state.open) return;
+              state.open = true;
+              wrapper.classList.add('open');
+              state.renderMenu();
+            };
+
+            state.closeMenu = () => {
+              if (!state.open) return;
+              state.open = false;
+              wrapper.classList.remove('open');
+            };
+
+            state.filterOptions = (needle) => {
+              const query = needle.trim().toLowerCase();
+              if (!query) {
+                state.filtered = state.options.slice().sort(config.sorter);
+                state.highlightIndex = state.filtered.findIndex(opt => state.selected && opt.value === state.selected.value);
+                state.renderMenu();
+                return;
+              }
+
+              state.filtered = state.options.filter(opt => config.matcher(opt, query)).sort(config.sorter);
+              state.highlightIndex = state.filtered.length ? 0 : -1;
+              state.renderMenu();
+            };
+
+            state.chooseOption = (opt) => {
+              state.selected = opt;
+              selectEl.value = opt ? opt.value : '';
+              state.showSelection = true;
+              inputEl.value = opt ? opt.label : '';
+              state.closeMenu();
+              selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+
+            const handleCreate = async (label) => {
+              if (!config.allowCreate || !config.create) {
+                alert('Cannot create new option here.');
+                return;
+              }
+              try {
+                const created = await config.create(label, state);
+                if (!created) return;
+                const option = {
+                  value: created.value === undefined || created.value === null ? '' : String(created.value),
+                  label: created.label === undefined || created.label === null ? label : String(created.label),
+                  raw: created.raw !== undefined ? created.raw : created,
+                };
+                state.options.push(option);
+                optionMap.set(option.value, option);
+                selectEl.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`);
+                propagateAdd(state, option);
+                state.filterOptions('');
+                state.chooseOption(option);
+              } catch (err) {
+                showError(err);
+              }
+            };
+
+            const handleEdit = async (opt) => {
+              if (!config.allowEdit || !config.edit) return;
+              if (!opt || opt.value === '' || opt.value === null) return;
+              const nextLabel = prompt('Rename item', opt.label);
+              if (!nextLabel || nextLabel.trim() === opt.label.trim()) return;
+              try {
+                const updated = await config.edit(opt, nextLabel.trim(), state);
+                opt.label = updated && updated.label ? String(updated.label) : nextLabel.trim();
+                opt.raw = updated && updated.raw !== undefined ? updated.raw : opt.raw;
+                const nativeOpt = [...selectEl.options].find(o => o.value === opt.value);
+                if (nativeOpt) nativeOpt.textContent = opt.label;
+                inputEl.value = state.selected && state.selected.value === opt.value ? opt.label : inputEl.value;
+                propagateUpdate(state, opt);
+                state.filterOptions(inputEl.value);
+              } catch (err) {
+                showError(err);
+              }
+            };
+
+            const handleDelete = async (opt) => {
+              if (!config.allowDelete || !config.remove) return;
+              if (!opt || opt.value === '' || opt.value === null) return;
+              if (!confirm(`Delete "${opt.label}"?`)) return;
+              if (!confirm('This action cannot be undone. Continue?')) return;
+              try {
+                await config.remove(opt, state);
+                state.options = state.options.filter(o => o.value !== opt.value);
+                optionMap.delete(opt.value);
+                [...selectEl.options].forEach(o => { if (o.value === opt.value) o.remove(); });
+                if (state.selected && state.selected.value === opt.value) {
+                  state.selected = null;
+                  selectEl.value = '';
+                  inputEl.value = '';
+                  state.showSelection = config.prefill;
+                }
+                propagateRemove(state, opt);
+                state.filterOptions(inputEl.value);
+              } catch (err) {
+                showError(err);
+              }
+            };
+
+            const handleKeyDown = (evt) => {
+              if (evt.key === 'ArrowDown') {
+                evt.preventDefault();
+                if (!state.open) {
+                  state.openMenu();
+                  state.filterOptions('');
+                }
+                if (!state.filtered.length) return;
+                state.highlightIndex = (state.highlightIndex + 1) % state.filtered.length;
+                highlightCurrent();
+              } else if (evt.key === 'ArrowUp') {
+                evt.preventDefault();
+                if (!state.open) {
+                  state.openMenu();
+                  state.filterOptions('');
+                }
+                if (!state.filtered.length) return;
+                state.highlightIndex = state.highlightIndex <= 0 ? state.filtered.length - 1 : state.highlightIndex - 1;
+                highlightCurrent();
+              } else if (evt.key === 'Enter') {
+                evt.preventDefault();
+                if (state.open && state.highlightIndex >= 0 && state.highlightIndex < state.filtered.length) {
+                  state.chooseOption(state.filtered[state.highlightIndex]);
+                } else {
+                  const label = inputEl.value.trim();
+                  const existing = state.options.find(o => o.label.toLowerCase() === label.toLowerCase());
+                  if (existing) {
+                    state.chooseOption(existing);
+                  } else if (label) {
+                    handleCreate(label);
+                  }
+                }
+              } else if (evt.key === 'Escape') {
+                state.closeMenu();
+              }
+            };
+
+            const highlightCurrent = () => {
+              [...menuEl.querySelectorAll('.dropdown-item')].forEach((item, idx) => {
+                if (idx === state.highlightIndex) item.classList.add('highlight');
+                else item.classList.remove('highlight');
+              });
+            };
+
+            inputEl.addEventListener('focus', () => {
+              state.openMenu();
+              state.filterOptions('');
+            });
+            inputEl.addEventListener('input', () => {
+              state.filterOptions(inputEl.value);
+              state.openMenu();
+            });
+            inputEl.addEventListener('keydown', handleKeyDown);
+            if (toggleEl) {
+              toggleEl.addEventListener('mousedown', (evt) => {
+                evt.preventDefault();
+                if (state.open) state.closeMenu(); else {
+                  state.openMenu();
+                  state.filterOptions('');
+                  inputEl.focus();
+                }
+              });
+            }
+
+            document.addEventListener('mousedown', (evt) => {
+              if (!wrapper.contains(evt.target)) {
+                state.closeMenu();
+              }
+            });
+
+            syncSelectedFromSelect();
+            state.filterOptions('');
+          });
+        }
+
+        function refreshAllDropdowns() {
+          dropdownInstances.forEach(state => {
+            const { options, selectEl, config, inputEl } = state;
+            const optionMap = new Map(options.map(opt => [opt.value, opt]));
+            state.optionMap = optionMap;
+            state.filtered = options.slice().sort(config.sorter);
+            selectEl.innerHTML = options.map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join('');
+            if (state.selected) {
+              const current = optionMap.get(state.selected.value);
+              if (current) {
+                state.selected = current;
+                selectEl.value = current.value;
+                if (state.showSelection) inputEl.value = current.label;
+                else inputEl.value = '';
+              }
+            }
+          });
+        }
+
+        let tableDropdownSeq = 0;
+        function setupTableEditing(container, base, rows, columnConfig = {}) {
+          if (!container) return;
+          const tableEl = container.querySelector(`table[data-table-base="${base}"]`);
+          if (!tableEl) return;
+          const rowMap = Object.fromEntries((rows || []).map(r => [String(r.id), r]));
+          const dropdownCells = [];
+
+          tableEl.querySelectorAll('td[data-field]').forEach(td => {
+            const field = td.dataset.field;
+            const rowId = td.dataset.id || '';
+            const row = rowMap[rowId] || {};
+            const rawValue = row[field];
+            const rawString = rawValue === null || rawValue === undefined ? '' : String(rawValue);
+            td.dataset.raw = rawString;
+            td.title = rawString;
+
+            const cfg = columnConfig[field];
+            if (!cfg) return;
+
+            if (cfg.render) {
+              const rendered = cfg.render(rawValue, row);
+              td.textContent = rendered === null || rendered === undefined ? '' : rendered;
+            }
+
+            if (cfg.type === 'dropdown') {
+              const optionSource = cfg.getOptions ? cfg.getOptions(row, rawValue) : (cfg.options || []);
+              const allowNull = cfg.allowNull ?? false;
+              const nullOptionLabel = cfg.nullOptionLabel || '(none)';
+              const options = [];
+              if (allowNull) options.push({ value: '', label: nullOptionLabel, raw: null });
+              optionSource.forEach(opt => {
+                if (!opt) return;
+                options.push({
+                  value: opt.value,
+                  label: opt.label,
+                  raw: opt.raw !== undefined ? opt.raw : opt,
+                });
+              });
+
+              const dropdownName = `${field}_${rowId || 'row'}_${++tableDropdownSeq}`;
+              const dropdownConfig = Object.assign({}, cfg.handlers || {}, {
+                allowCreate: cfg.allowCreate !== false,
+                allowEdit: cfg.allowEdit !== false,
+                allowDelete: cfg.allowDelete !== false,
+                prefill: cfg.prefill !== false,
+              });
+              td.innerHTML = select(dropdownName, options, dropdownConfig);
+              td.dataset.editor = 'dropdown';
+              td.dataset.valueType = cfg.valueType || 'string';
+              if (allowNull) td.dataset.allowNull = '1'; else delete td.dataset.allowNull;
+              td.removeAttribute('contenteditable');
+              dropdownCells.push({ td, rawString });
+            }
+          });
+
+          dropdownCells.forEach(({ td }) => initializeDropdowns(td));
+          dropdownCells.forEach(({ td, rawString }) => {
+            const selectEl = td.querySelector('select');
+            if (!selectEl) return;
+            selectEl.value = rawString;
+            selectEl.dispatchEvent(new Event('change'));
+            const updateTooltip = () => {
+              const val = selectEl.value;
+              td.dataset.raw = val;
+              td.title = val;
+              const wrapper = td.querySelector('.dropdown');
+              if (wrapper) wrapper.title = val;
+            };
+            selectEl.addEventListener('change', updateTooltip);
+            updateTooltip();
+          });
+        }
+
+        const stripId = (obj) => {
+          if (!obj || typeof obj !== 'object') return {};
+          const copy = { ...obj };
+          delete copy.id;
+          return copy;
+        };
+
+        function buildResourceDropdownHandlers(resourcePath, options = {}) {
+          const {
+            formatLabel = (item) => item && item.name ? item.name : (item && item.label ? item.label : String(item?.id ?? '')),
+            createDefaults = {},
+            buildCreateBody,
+            buildUpdateBody,
+            matcherFields = [],
+            matcherText,
+            normalize,
+          } = options;
+
+          const normalise = (item) => normalize ? normalize(item) : item;
+
+          return {
+            create: async (label) => {
+              const payload = buildCreateBody
+                ? buildCreateBody(label)
+                : { ...createDefaults, name: label };
+              const created = await apiCreate(resourcePath, payload);
+              const raw = normalise(created);
+              return {
+                value: raw?.id ?? created?.id ?? label,
+                label: formatLabel(raw),
+                raw,
+              };
+            },
+            edit: async (option, nextLabel) => {
+              const raw = normalise(option.raw || {});
+              const payload = buildUpdateBody
+                ? buildUpdateBody(raw, nextLabel)
+                : { ...stripId(raw), name: nextLabel };
+              const updated = await apiUpdate(`${resourcePath}/${option.value}`, payload);
+              const norm = normalise(updated);
+              return {
+                value: norm?.id ?? option.value,
+                label: formatLabel(norm),
+                raw: norm,
+              };
+            },
+            remove: async (option) => {
+              await apiDelete(`${resourcePath}/${option.value}`);
+            },
+            matcher: (option, needle) => {
+              const raw = normalise(option.raw || {});
+              if (matcherText) {
+                return matcherText(raw, option).toLowerCase().includes(needle);
+              }
+              const parts = [option.label];
+              matcherFields.forEach(field => {
+                if (raw && raw[field] !== undefined && raw[field] !== null) parts.push(String(raw[field]));
+              });
+              return parts.join(' ').toLowerCase().includes(needle);
+            },
+          };
+        }
+
         const card = (title, inner='') => `<div class="card"><h3>${title}</h3>${inner}</div>`;
+        const normaliseColumns = (cols) => cols.map(col => {
+          if (typeof col === 'string') {
+            const pretty = col.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            return { key: col, label: pretty };
+          }
+          return col;
+        });
         const table = (rows, cols, base) => {
+          const columns = normaliseColumns(cols);
           if (!rows || !rows.length) return '<div>(empty)</div>';
-          const head = '<tr>' + cols.map(c=>`<th>${c}</th>`).join('') + '<th>Actions</th></tr>';
+          const head = '<tr>' + columns.map(c=>`<th>${c.label}</th>`).join('') + '<th>Actions</th></tr>';
           const body = rows.map(r => `
             <tr>
-              ${cols.map(c=>{
-                const editable = c === 'id' ? '' : ' contenteditable';
-                return `<td${editable} data-field="${c}" data-id="${r.id}">${r[c] ?? ''}</td>`;
+              ${columns.map(col=>{
+                const value = r[col.key];
+                const text = value === null || value === undefined ? '' : String(value);
+                const editable = col.key === 'id' ? '' : ' contenteditable';
+                const rawAttr = escapeHtml(text);
+                const title = rawAttr ? ` title="${rawAttr}"` : '';
+                return `<td${editable} data-field="${col.key}" data-id="${r.id}" data-raw="${rawAttr}"${title}>${escapeHtml(text)}</td>`;
               }).join('')}
               <td>
                 <button onclick="window.__updateRow?.('${base}', ${r.id}, this)">Save</button>
@@ -67,7 +659,7 @@
                 ${base === '/api/entries' && FEATURES.REALLOCATE ? `<button class="btn-reallocate" data-entry-id="${r.id}">⋯</button>` : ''}
               </td>
             </tr>`).join('');
-          return `<table class="table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+          return `<table class="table" data-table-base="${escapeHtml(base)}"><thead>${head}</thead><tbody>${body}</tbody></table>`;
         };
 
         const fmtCurrency = (value) => {
@@ -114,6 +706,13 @@
           while (cur) { path.unshift(cur.name); if (!cur.parent_id) break; cur = byId[cur.parent_id]; }
           return path.join(' > ');
         };
+        const formatPortfolioLabel = (p) => `${p.name}${p.fiscal_year ? ' • FY ' + p.fiscal_year : ''}`;
+        const formatProjectGroupLabel = (pg) => `${pg.code ? pg.code + ' – ' : ''}${pg.name}`;
+        const formatProjectLabel = (project, portfolioLookup) => {
+          const fs = portfolioLookup && portfolioLookup[project.portfolio_id];
+          const fsLabel = fs ? formatPortfolioLabel(fs) : `Funding Source ${project.portfolio_id}`;
+          return `[${fsLabel}] ${project.name}`;
+        };
 
         let reallocateDrawer = null;
         let reallocateCurrent = null;
@@ -124,6 +723,15 @@
           const drawer = document.createElement('div');
           drawer.id = 'reallocateDrawer';
           drawer.className = 'drawer hidden';
+          const reallocateFundingHandlers = { key: 'portfolio', ...buildResourceDropdownHandlers('/api/portfolios', {
+            formatLabel: formatPortfolioLabel,
+            matcherFields: ['name'],
+          }) };
+          const reallocateCategoryHandlers = { key: 'category', ...buildResourceDropdownHandlers('/api/categories', {
+            formatLabel: (cat) => cat.name,
+            matcherFields: ['name'],
+          }) };
+
           drawer.innerHTML = `
             <div class="drawer-panel">
               <div class="drawer-header">
@@ -134,11 +742,11 @@
                 <div class="field"><label>Source</label><div id="reallocateSource"></div></div>
                 <div class="field">
                   <label for="reallocateFunding">Destination Funding Source</label>
-                  <select name="funding_source" id="reallocateFunding"></select>
+                  ${select('funding_source', [], reallocateFundingHandlers)}
                 </div>
                 <div class="field">
                   <label for="reallocateCategory">Destination Category</label>
-                  <select name="category" id="reallocateCategory"></select>
+                  ${select('category', [], reallocateCategoryHandlers)}
                 </div>
                 <div class="field">
                   <label for="reallocateAmount">Amount</label>
@@ -154,13 +762,14 @@
               </form>
             </div>`;
           document.body.appendChild(drawer);
+          initializeDropdowns(drawer);
           drawer.querySelector('#closeReallocate').onclick = () => closeReallocate();
           reallocateSubmit = drawer.querySelector('#reallocateForm');
           reallocateSubmit.addEventListener('submit', async (evt) => {
             evt.preventDefault();
             if (!reallocateCurrent) return;
-            const fsId = Number(drawer.querySelector('#reallocateFunding').value);
-            const categoryId = Number(drawer.querySelector('#reallocateCategory').value);
+            const fsId = Number(drawer.querySelector('select[name=funding_source]').value);
+            const categoryId = Number(drawer.querySelector('select[name=category]').value);
             const amount = drawer.querySelector('#reallocateAmount').value;
             const memo = drawer.querySelector('#reallocateMemo').value || 'Reallocate entry';
             if (!fsId || Number.isNaN(fsId)) return alert('Pick a funding source.');
@@ -189,10 +798,38 @@
           drawer.classList.remove('hidden');
           const sourceBox = drawer.querySelector('#reallocateSource');
           sourceBox.innerHTML = `#${entry.id} • ${entry.kind || ''} • ${fmtCurrency(entry.amount)}\n<small>${entry.description || ''}</small>`;
-          const fundingSel = drawer.querySelector('#reallocateFunding');
-          const categorySel = drawer.querySelector('#reallocateCategory');
-          fundingSel.innerHTML = fundingSources.map(fs => `<option value="${fs.id}">${fs.name}</option>`).join('');
-          categorySel.innerHTML = categories.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
+          const fundingSel = drawer.querySelector('select[name=funding_source]');
+          const categorySel = drawer.querySelector('select[name=category]');
+
+          if (fundingSel && fundingSel.__dropdown) {
+            const options = fundingSources.map(fs => ({ value: fs.id, label: fs.name, raw: fs }));
+            const dropdown = fundingSel.__dropdown;
+            dropdown.options = options;
+            dropdown.optionMap = new Map(options.map(opt => [String(opt.value), opt]));
+            fundingSel.innerHTML = options.map(opt => `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`).join('');
+            dropdown.filterOptions('');
+            dropdown.selected = null;
+            dropdown.showSelection = dropdown.config.prefill;
+            fundingSel.value = '';
+            dropdown.inputEl.value = '';
+          } else if (fundingSel) {
+            fundingSel.innerHTML = fundingSources.map(fs => `<option value="${fs.id}">${fs.name}</option>`).join('');
+          }
+
+          if (categorySel && categorySel.__dropdown) {
+            const options = categories.map(c => ({ value: c.id, label: c.label, raw: c }));
+            const dropdown = categorySel.__dropdown;
+            dropdown.options = options;
+            dropdown.optionMap = new Map(options.map(opt => [String(opt.value), opt]));
+            categorySel.innerHTML = options.map(opt => `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`).join('');
+            dropdown.filterOptions('');
+            dropdown.selected = null;
+            dropdown.showSelection = dropdown.config.prefill;
+            categorySel.value = '';
+            dropdown.inputEl.value = '';
+          } else if (categorySel) {
+            categorySel.innerHTML = categories.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
+          }
           drawer.querySelector('#reallocateAmount').value = entry.amount || '';
           drawer.querySelector('#reallocateMemo').value = '';
         }
@@ -208,9 +845,23 @@
             const tr = btn.closest('tr');
             const tds = [...tr.querySelectorAll('[data-field]')];
             const body = {};
-            tds.forEach(td => { body[td.dataset.field] = td.innerText.trim(); });
+            tds.forEach(td => {
+              const field = td.dataset.field;
+              let value;
+              if (td.dataset.editor === 'dropdown') {
+                const selectEl = td.querySelector('select');
+                value = selectEl ? selectEl.value : (td.dataset.raw ?? '');
+                const wrapper = td.querySelector('.dropdown');
+                if (wrapper) wrapper.title = value;
+              } else {
+                value = td.innerText.trim();
+              }
+              td.dataset.raw = value;
+              td.title = value;
+              body[field] = value;
+            });
             delete body.id;
-  
+
             const ALLOW = {
               '/api/portfolios': ['name','fiscal_year','owner'],
               '/api/project-groups': ['code','name','description'],
@@ -254,8 +905,15 @@
                 ${field('owner', labelFor('owner','Owner', 'Approver / controller.'), input('owner','Dan'))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All Funding Sources', table(portfolios, ['id','name','fiscal_year','owner'], '/api/portfolios'));
-  
+            + card('All Funding Sources', table(portfolios, [
+              { key: 'id', label: 'ID' },
+              { key: 'name', label: 'Funding Source Name' },
+              { key: 'fiscal_year', label: 'Fiscal Year' },
+              { key: 'owner', label: 'Owner' },
+            ], '/api/portfolios'));
+
+          initializeDropdowns(content);
+
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
             const [name, fiscal_year, owner] = [...content.querySelectorAll('input')].map(i=>i.value);
@@ -270,12 +928,19 @@
           content.innerHTML =
             card('Add Project Group', `
               <div class="row">
-                ${field('code', labelFor('code','Code', 'Short code shared across portfolios. e.g., "COBRA".'), input('code','COBRA'))}
+                ${field('code', labelFor('code','Code', 'Short code shared across funding sources e.g., "COBRA".'), input('code','COBRA'))}
                 ${field('name', labelFor('name','Name', 'Program name (rollup label).'), input('name','Cobra Program'))}
                 ${field('description', labelFor('description','Description','What counts as this program.'), `<textarea class="input" name="description" rows="1" placeholder="Optional"></textarea>`)}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All Project Groups', table(pgs, ['id','code','name','description'], '/api/project-groups'));
+            + card('All Project Groups', table(pgs, [
+              { key: 'id', label: 'ID' },
+              { key: 'code', label: 'Code' },
+              { key: 'name', label: 'Project Group Name' },
+              { key: 'description', label: 'Description' },
+            ], '/api/project-groups'));
+
+          initializeDropdowns(content);
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
             const code = content.querySelector('input[name=code]').value;
@@ -291,20 +956,70 @@
           const [portfolios, pgs, projects] = await Promise.all([
             apiList('/api/portfolios'), apiList('/api/project-groups'), apiList('/api/projects')
           ]);
-          const portfolioOpts = portfolios.map(p=>({value:p.id, label:`${p.name}${p.fiscal_year ? ' • FY '+p.fiscal_year : ''}`}));
-          const pgOpts = [{value:'', label:'(none)'}].concat(pgs.map(pg=>({value:pg.id, label:`${pg.code?pg.code+' – ':''}${pg.name}`})));
+          const portfolioOpts = portfolios.map(p => ({ value: p.id, label: formatPortfolioLabel(p), raw: p }));
+          const basePortfolioHandlers = buildResourceDropdownHandlers('/api/portfolios', {
+            formatLabel: formatPortfolioLabel,
+            buildCreateBody: (label) => ({ name: label }),
+            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
+            matcherFields: ['fiscal_year', 'owner', 'type', 'car_code', 'cc_code'],
+          });
+          const portfolioHandlers = { key: 'portfolio', ...basePortfolioHandlers };
+          const pgOpts = [{ value: '', label: '(none)', raw: null }].concat(
+            pgs.map(pg => ({ value: pg.id, label: formatProjectGroupLabel(pg), raw: pg }))
+          );
+          const baseProjectGroupHandlers = buildResourceDropdownHandlers('/api/project-groups', {
+            formatLabel: formatProjectGroupLabel,
+            buildCreateBody: (label) => ({ name: label }),
+            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
+            matcherFields: ['code', 'description'],
+          });
+          const projectGroupHandlers = { key: 'project-group', ...baseProjectGroupHandlers };
+          const projectGroupOptions = pgs.map(pg => ({ value: pg.id, label: formatProjectGroupLabel(pg), raw: pg }));
+          const originalGroupCreate = projectGroupHandlers.create;
+          projectGroupHandlers.create = async (label) => {
+            const created = await originalGroupCreate(label);
+            if (created && created.value !== undefined) {
+              projectGroupOptions.push({ value: created.value, label: created.label, raw: created.raw });
+            }
+            return created;
+          };
 
           content.innerHTML =
             card('Add Project', `
               <div class="row">
-                ${field('portfolio_id', labelFor('portfolio_id','Funding Source', 'Each project belongs to a single funding source.'), select('portfolio_id', portfolioOpts))}
-                ${field('name', labelFor('name','Project Name', 'Per-portfolio project name (duplicates allowed across portfolios).'), input('name','Cobra'))}
-                ${field('group_id', labelFor('group_id','Project Group', 'Use to roll up similar projects across portfolios.'), select('group_id', pgOpts))}
+                ${field('portfolio_id', labelFor('portfolio_id','Funding Source', 'Each project belongs to a single funding source.'), select('portfolio_id', portfolioOpts, portfolioHandlers))}
+                ${field('name', labelFor('name','Project Name', 'Per funding source project name (duplicates allowed across funding sources).'), input('name','Cobra'))}
+                ${field('group_id', labelFor('group_id','Project Group', 'Use to roll up similar projects across funding sources.'), select('group_id', pgOpts, projectGroupHandlers))}
                 ${field('code', labelFor('code','Project Code (optional)','Internal alias'), input('code','COBRA-PM1'))}
                 ${field('line', labelFor('line','Line/Asset (optional)','e.g., EX6'), input('line','EX6'))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All Projects', table(projects, ['id','portfolio_id','name','group_id','code','line'], '/api/projects'));
+            + card('All Projects', table(projects, [
+              { key: 'id', label: 'ID' },
+              { key: 'portfolio_id', label: 'Funding Source' },
+              { key: 'name', label: 'Project Name' },
+              { key: 'group_id', label: 'Project Group' },
+              { key: 'code', label: 'Project Code' },
+              { key: 'line', label: 'Line / Asset' },
+            ], '/api/projects'));
+
+          initializeDropdowns(content);
+          setupTableEditing(content, '/api/projects', projects, {
+            portfolio_id: {
+              type: 'dropdown',
+              options: portfolioOpts,
+              handlers: portfolioHandlers,
+              valueType: 'number',
+            },
+            group_id: {
+              type: 'dropdown',
+              getOptions: () => projectGroupOptions,
+              handlers: projectGroupHandlers,
+              valueType: 'number',
+              allowNull: true,
+              nullOptionLabel: '(none)',
+            },
+          });
 
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
@@ -323,21 +1038,85 @@
   
         async function renderCategories(){
           const [projects, categories] = await Promise.all([apiList('/api/projects'), apiList('/api/categories')]);
-          const projOpts = [{value:'', label:'(Global)'}].concat(projects.map(p=>({
-            value: p.id, label: `Project #${p.id} — ${p.name} [Portfolio ${p.portfolio_id}]`
+          const categoryMap = mapBy(categories);
+          const projectMap = mapBy(projects);
+
+          const projOpts = [{ value: '', label: '(Global)', raw: null }].concat(projects.map(p=>({
+            value: p.id,
+            label: `Project #${p.id} — ${p.name} [Funding Source ${p.portfolio_id}]`,
+            raw: p,
           })));
-          const catOpts = [{value:'', label:'(No parent)'}].concat(categories.map(c=>({value:c.id, label:`#${c.id} — ${c.name}`})));
-  
+          const projectHandlers = { key: 'project', ...buildResourceDropdownHandlers('/api/projects', {
+            formatLabel: (p) => `Project #${p.id} — ${p.name} [Funding Source ${p.portfolio_id}]`,
+            buildCreateBody: (label) => ({ name: label, portfolio_id: projects[0]?.portfolio_id ?? 1 }),
+            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
+            matcherFields: ['portfolio_id', 'code', 'line'],
+          }) };
+          const catOpts = [{ value: '', label: '(No parent)', raw: null }].concat(categories.map(c=>({
+            value: c.id,
+            label: catPath(c, categoryMap),
+            raw: c,
+          })));
+          const categoryHandlers = { key: 'category', ...buildResourceDropdownHandlers('/api/categories', {
+            formatLabel: (c) => catPath(c, { ...categoryMap, [c.id]: c }),
+            buildCreateBody: (label) => ({ name: label }),
+            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
+            matcherFields: ['project_id', 'parent_id'],
+          }) };
+
+          const parentOptions = categories.map(c => ({ value: c.id, label: catPath(c, categoryMap), raw: c }));
+          const projectOptions = projects.map(p => ({ value: p.id, label: `Project #${p.id} — ${p.name}`, raw: p }));
+          const originalProjectCreateForCategories = projectHandlers.create;
+          projectHandlers.create = async (label) => {
+            const created = await originalProjectCreateForCategories(label);
+            if (created && created.value !== undefined) {
+              projectOptions.push({ value: created.value, label: created.label, raw: created.raw });
+            }
+            return created;
+          };
+          const originalProjectEditForCategories = projectHandlers.edit;
+          projectHandlers.edit = async (option, nextLabel) => {
+            const updated = await originalProjectEditForCategories(option, nextLabel);
+            const target = projectOptions.find(opt => opt.value === updated.value);
+            if (target) target.label = updated.label;
+            return updated;
+          };
+
           content.innerHTML =
             card('Add Category (n-level)', `
               <div class="row">
                 ${field('name', labelFor('name','Name', 'E.g., "Parts" → "Long Lead".'), input('name','Parts / Long Lead'))}
-                ${field('parent_id', labelFor('parent_id','Parent', 'Choose a parent to nest; else root.'), select('parent_id', catOpts))}
-                ${field('project_id', labelFor('project_id','Scope (Project)','Blank = global tree; otherwise project-scoped.'), select('project_id', projOpts))}
+                ${field('parent_id', labelFor('parent_id','Parent', 'Choose a parent to nest; else root.'), select('parent_id', catOpts, { ...categoryHandlers, allowCreate: false, allowDelete: false }))}
+                ${field('project_id', labelFor('project_id','Scope (Project)','Blank = global tree; otherwise project-scoped.'), select('project_id', projOpts, { ...projectHandlers, allowCreate: false }))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>
             `)
-            + card('All Categories', table(categories, ['id','name','parent_id','project_id'], '/api/categories'));
+            + card('All Categories', table(categories, [
+              { key: 'id', label: 'ID' },
+              { key: 'name', label: 'Category Name' },
+              { key: 'parent_id', label: 'Parent Category' },
+              { key: 'project_id', label: 'Project Scope' },
+            ], '/api/categories'));
+
+          initializeDropdowns(content);
+          setupTableEditing(content, '/api/categories', categories, {
+            parent_id: {
+              type: 'dropdown',
+              getOptions: (row) => parentOptions.filter(opt => opt.value !== row.id),
+              handlers: categoryHandlers,
+              valueType: 'number',
+              allowNull: true,
+              nullOptionLabel: '(No parent)',
+            },
+            project_id: {
+              type: 'dropdown',
+              options: projectOptions,
+              handlers: projectHandlers,
+              valueType: 'number',
+              allowNull: true,
+              nullOptionLabel: '(Global)',
+            },
+          });
   
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
@@ -363,7 +1142,12 @@
                 ${field('name', labelFor('name','Vendor name','e.g., "Acme Co."'), input('name','Acme Co.'))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All Vendors', table(vendors, ['id','name'], '/api/vendors'));
+            + card('All Vendors', table(vendors, [
+              { key: 'id', label: 'ID' },
+              { key: 'name', label: 'Vendor Name' },
+            ], '/api/vendors'));
+
+          initializeDropdowns(content);
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
             const name = content.querySelector('input[name=name]').value;
@@ -375,7 +1159,7 @@
   
         // ---- Kind help ----
         const KIND_HELP = {
-          budget: { title:'Budget', text:`Sets the planned target (limit) for a category/project/portfolio.`, required:['amount','portfolio_id'] },
+          budget: { title:'Budget', text:`Sets the planned target (limit) for a category/project/funding source.`, required:['amount','portfolio_id'] },
           quote: { title:'Quote', text:`Vendor quotation (not a PO). Use to compare pricing; does not affect actuals.`, required:['amount','portfolio_id','vendor_id','quote_ref'] },
           po: { title:'PO', text:`Issued/committed spend with a PO number. Counts toward actuals.`, required:['amount','portfolio_id','po_number'] },
           unplanned: { title:'Unplanned', text:`Actual spend not originally budgeted. Counts toward actuals.`, required:['amount','portfolio_id'] },
@@ -401,15 +1185,139 @@
             apiList('/api/funding-sources'),
           ]);
           const portfolioMap = mapBy(portfolios);
-          const portfolioOpts = portfolios.map(p => ({ value: p.id, label: `${p.name}${p.fiscal_year ? ' • FY ' + p.fiscal_year : ''}` }));
-          const projectOpts = projects.map(p => {
-            const fs = portfolioMap[p.portfolio_id];
-            const fsLabel = fs ? `${fs.name}${fs.fiscal_year ? ' • FY ' + fs.fiscal_year : ''}` : `Funding ${p.portfolio_id}`;
-            return { value: p.id, label: `[${fsLabel}] ${p.name}` };
+          const portfolioOpts = portfolios.map(p => ({ value: p.id, label: formatPortfolioLabel(p), raw: p }));
+          const basePortfolioHandlers = buildResourceDropdownHandlers('/api/portfolios', {
+            formatLabel: formatPortfolioLabel,
+            matcherFields: ['fiscal_year', 'owner', 'type', 'car_code', 'cc_code'],
           });
+          const portfolioHandlers = {
+            key: 'portfolio',
+            ...basePortfolioHandlers,
+            create: async (label) => {
+              const created = await basePortfolioHandlers.create(label);
+              const option = { value: created.value, label: created.label, raw: created.raw };
+              portfolioOpts.push(option);
+              if (option.raw && option.raw.id !== undefined) {
+                portfolioMap[option.raw.id] = option.raw;
+              }
+              return option;
+            },
+            edit: async (option, nextLabel) => {
+              const updated = await basePortfolioHandlers.edit(option, nextLabel);
+              if (updated.raw && updated.raw.id !== undefined) {
+                portfolioMap[updated.raw.id] = updated.raw;
+              }
+              updated.label = formatPortfolioLabel(updated.raw);
+              return updated;
+            },
+            remove: async (option) => {
+              await basePortfolioHandlers.remove(option);
+              if (option.raw && option.raw.id !== undefined) delete portfolioMap[option.raw.id];
+            },
+          };
+
+          const projectOpts = projects.map(p => ({ value: p.id, label: formatProjectLabel(p, portfolioMap), raw: p }));
+          const baseProjectHandlers = buildResourceDropdownHandlers('/api/projects', {
+            formatLabel: (proj) => formatProjectLabel(proj, portfolioMap),
+            matcherText: (proj) => `${proj.name} ${proj.code || ''} ${proj.line || ''} ${formatPortfolioLabel(portfolioMap[proj.portfolio_id] || { name: proj.portfolio_id })}`,
+            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label, portfolio_id: raw.portfolio_id ?? null }),
+          });
+          const projectHandlers = {
+            key: 'project',
+            ...baseProjectHandlers,
+            create: async (label) => {
+              const portfolioSelect = content.querySelector('select[name=portfolio_id]');
+              const portfolioValue = portfolioSelect ? Number(portfolioSelect.value) : NaN;
+              if (!portfolioValue || Number.isNaN(portfolioValue)) {
+                alert('Pick a funding source first so the project can be created under it.');
+                return null;
+              }
+              const payload = { name: label, portfolio_id: portfolioValue };
+              const created = await apiCreate('/api/projects', payload);
+              projectOpts.push({ value: created.id, label: formatProjectLabel(created, portfolioMap), raw: created });
+              return { value: created.id, label: formatProjectLabel(created, portfolioMap), raw: created };
+            },
+            edit: async (option, nextLabel) => {
+              const updated = await baseProjectHandlers.edit(option, nextLabel);
+              option.raw = updated.raw;
+              updated.label = formatProjectLabel(updated.raw, portfolioMap);
+              const target = projectOpts.find(opt => String(opt.value) === String(updated.value));
+              if (target) {
+                target.label = updated.label;
+                target.raw = updated.raw;
+              }
+              return updated;
+            },
+          };
+
           const categoryMap = mapBy(categories);
-          const categoryOpts = categories.map(c => ({ value: c.id, label: catPath(c, categoryMap) }));
-          const vendorOpts = vendors.map(v => ({ value: v.id, label: v.name }));
+          const categoryOpts = categories.map(c => ({ value: c.id, label: catPath(c, categoryMap), raw: c }));
+          const baseCategoryHandlers = buildResourceDropdownHandlers('/api/categories', {
+            formatLabel: (cat) => catPath(cat, { ...categoryMap, [cat.id]: cat }),
+            matcherText: (cat) => catPath(cat, categoryMap),
+            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
+          });
+          const categoryHandlers = {
+            key: 'category',
+            ...baseCategoryHandlers,
+            create: async (label) => {
+              const projectSelect = content.querySelector('select[name=project_id]');
+              const projectValue = projectSelect ? Number(projectSelect.value) : NaN;
+              const payload = { name: label, project_id: Number.isNaN(projectValue) ? null : projectValue || null };
+              const created = await apiCreate('/api/categories', payload);
+              categoryMap[created.id] = created;
+              const option = { value: created.id, label: catPath(created, categoryMap), raw: created };
+              categoryOpts.push(option);
+              parentOptions.push({ value: created.id, label: option.label, raw: created });
+              return option;
+            },
+            edit: async (option, nextLabel) => {
+              const updated = await baseCategoryHandlers.edit(option, nextLabel);
+              categoryMap[updated.raw.id] = updated.raw;
+              updated.label = catPath(updated.raw, categoryMap);
+              const catOption = categoryOpts.find(opt => String(opt.value) === String(updated.value));
+              if (catOption) {
+                catOption.label = updated.label;
+                catOption.raw = updated.raw;
+              }
+              const parentOption = parentOptions.find(opt => opt.value === updated.raw.id);
+              if (parentOption) parentOption.label = updated.label;
+              return updated;
+            },
+          };
+
+          const vendorOpts = vendors.map(v => ({ value: v.id, label: v.name, raw: v }));
+          const baseVendorHandlers = buildResourceDropdownHandlers('/api/vendors', {
+            formatLabel: (v) => v.name,
+            matcherFields: ['name'],
+          });
+          const vendorHandlers = { key: 'vendor', ...baseVendorHandlers };
+          const originalVendorCreate = vendorHandlers.create;
+          vendorHandlers.create = async (label) => {
+            const created = await originalVendorCreate(label);
+            if (created && created.value !== undefined) {
+              vendorOpts.push({ value: created.value, label: created.label, raw: created.raw });
+            }
+            return created;
+          };
+          const originalVendorEdit = vendorHandlers.edit;
+          vendorHandlers.edit = async (option, nextLabel) => {
+            const updated = await originalVendorEdit(option, nextLabel);
+            const target = vendorOpts.find(opt => String(opt.value) === String(updated.value));
+            if (target) {
+              target.label = updated.label;
+              target.raw = updated.raw;
+            }
+            return updated;
+          };
+
+          const kindOptions = [
+            { value: 'budget', label: 'budget (sets target)' },
+            { value: 'quote', label: 'quote (informational)' },
+            { value: 'po', label: 'po (actual)' },
+            { value: 'unplanned', label: 'unplanned (actual)' },
+            { value: 'adjustment', label: 'adjustment (actual)' },
+          ];
 
           content.innerHTML =
             card('Add Entry', `
@@ -419,13 +1327,7 @@
                     <div class="title">Basics <span class="hint">(date, kind, amount)</span></div>
                     <div class="row three">
                       ${field('date', labelFor('date','Date','Optional (YYYY-MM-DD).'), `<input class="input" type="date" name="date"/>`)}
-                      ${field('kind', labelFor('kind','What are you adding?','Budget sets limits; PO/Unplanned/Adjustment count to actuals; Quote is informational.'), `<select name="kind">
-                        <option value="budget">budget (sets target)</option>
-                        <option value="quote">quote (informational)</option>
-                        <option value="po">po (actual)</option>
-                        <option value="unplanned">unplanned (actual)</option>
-                        <option value="adjustment">adjustment (actual)</option>
-                      </select>`)}
+                      ${field('kind', labelFor('kind','What are you adding?','Budget sets limits; PO/Unplanned/Adjustment count to actuals; Quote is informational.'), select('kind', kindOptions, { allowCreate: false, allowEdit: false, allowDelete: false, prefill: false }))}
                       ${field('amount', labelFor('amount','Amount','Positive number; negative for adjustment credits.'), input('amount','1000'))}
                     </div>
                   </div>
@@ -433,16 +1335,16 @@
                   <div class="section">
                     <div class="title">Scope</div>
                     <div class="row three">
-                      ${field('portfolio_id', labelFor('portfolio_id','Funding Source','Primary funding source charged.'), select('portfolio_id', portfolioOpts))}
-                      ${field('project_id', labelFor('project_id','Project','Per funding-source project.'), select('project_id', projectOpts))}
-                      ${field('category_id', labelFor('category_id','Category (n-level)','Pick the most specific leaf.'), select('category_id', categoryOpts))}
+                      ${field('portfolio_id', labelFor('portfolio_id','Funding Source','Primary funding source charged.'), select('portfolio_id', portfolioOpts, { ...portfolioHandlers }))}
+                      ${field('project_id', labelFor('project_id','Project','Per funding-source project.'), select('project_id', projectOpts, { ...projectHandlers }))}
+                      ${field('category_id', labelFor('category_id','Category (n-level)','Pick the most specific leaf.'), select('category_id', categoryOpts, { ...categoryHandlers }))}
                     </div>
                   </div>
 
                   <div class="section">
                     <div class="title">Commercial</div>
                     <div class="row three">
-                      ${field('vendor_id', labelFor('vendor_id','Vendor','Who provided the quote/PO.'), select('vendor_id', vendorOpts))}
+                      ${field('vendor_id', labelFor('vendor_id','Vendor','Who provided the quote/PO.'), select('vendor_id', vendorOpts, { ...vendorHandlers }))}
                       ${field('quote_ref', labelFor('quote_ref','Quote Ref','For quotes.'), input('quote_ref','QT-0097'))}
                       ${field('po_number', labelFor('po_number','PO #','For POs.'), input('po_number','4500123456'))}
                     </div>
@@ -455,7 +1357,7 @@
                         ${labelFor('mischarged','Mark as mischarged','Check to flag this entry as charged to the wrong funding source.')}
                         <input type="checkbox" name="mischarged"/>
                       </div>
-                      ${field('intended_portfolio_id', labelFor('intended_portfolio_id','Intended Funding Source','Where it *should* be charged.'), select('intended_portfolio_id', [{ value: '', label: '(none)' }].concat(portfolioOpts)))}
+                      ${field('intended_portfolio_id', labelFor('intended_portfolio_id','Intended Funding Source','Where it *should* be charged.'), select('intended_portfolio_id', [{ value: '', label: '(none)', raw: null }].concat(portfolioOpts), { ...portfolioHandlers }))}
                     </div>
                   </div>
 
@@ -482,8 +1384,69 @@
               </div>
             `)
             + card('All Entries', table(entries, [
-              'id','date','kind','amount','portfolio_id','project_id','category_id','vendor_id','po_number','quote_ref','mischarged','intended_portfolio_id','description'
+              { key: 'id', label: 'ID' },
+              { key: 'date', label: 'Date' },
+              { key: 'kind', label: 'Kind' },
+              { key: 'amount', label: 'Amount' },
+              { key: 'portfolio_id', label: 'Funding Source' },
+              { key: 'project_id', label: 'Project' },
+              { key: 'category_id', label: 'Category' },
+              { key: 'vendor_id', label: 'Vendor' },
+              { key: 'po_number', label: 'PO #' },
+              { key: 'quote_ref', label: 'Quote Ref' },
+              { key: 'mischarged', label: 'Mischarged' },
+              { key: 'intended_portfolio_id', label: 'Intended Funding Source' },
+              { key: 'description', label: 'Description' },
             ], '/api/entries'));
+
+          initializeDropdowns(content);
+          setupTableEditing(content, '/api/entries', entries, {
+            portfolio_id: {
+              type: 'dropdown',
+              options: portfolioOpts,
+              handlers: portfolioHandlers,
+              valueType: 'number',
+            },
+            project_id: {
+              type: 'dropdown',
+              options: projectOpts,
+              handlers: projectHandlers,
+              valueType: 'number',
+              allowNull: true,
+              nullOptionLabel: '(none)',
+            },
+            category_id: {
+              type: 'dropdown',
+              options: categoryOpts,
+              handlers: categoryHandlers,
+              valueType: 'number',
+              allowNull: true,
+              nullOptionLabel: '(none)',
+            },
+            vendor_id: {
+              type: 'dropdown',
+              options: vendorOpts,
+              handlers: vendorHandlers,
+              valueType: 'number',
+              allowNull: true,
+              nullOptionLabel: '(none)',
+            },
+            intended_portfolio_id: {
+              type: 'dropdown',
+              options: portfolioOpts,
+              handlers: portfolioHandlers,
+              valueType: 'number',
+              allowNull: true,
+              nullOptionLabel: '(none)',
+            },
+            mischarged: {
+              render: (value) => {
+                if (value === true || value === 'true' || value === 1 || value === '1') return 'Yes';
+                if (value === false || value === 'false' || value === 0 || value === '0') return '';
+                return value == null ? '' : String(value);
+              },
+            },
+          });
 
           const misBox = content.querySelector('input[name=mischarged]');
           const intendedSel = content.querySelector('select[name=intended_portfolio_id]');
@@ -513,10 +1476,11 @@
           if (addAlloc) addAlloc.onclick = () => {
             allocsDiv.insertAdjacentHTML('beforeend', `
               <div class="row four" data-row="1" style="margin-bottom:6px">
-                ${field('alloc_portfolio', labelFor('alloc_portfolio','Funding Source','Destination funding source.'), select('alloc_portfolio', portfolioOpts))}
+                ${field('alloc_portfolio', labelFor('alloc_portfolio','Funding Source','Destination funding source.'), select('alloc_portfolio', portfolioOpts, { ...portfolioHandlers }))}
                 ${field('alloc_amount', labelFor('alloc_amount','Amount','Portion to this funding source.'), input('alloc_amount',''))}
                 <div class="field"><label>&nbsp;</label><button onclick="this.closest('[data-row]').remove()">Remove</button></div>
               </div>`);
+            initializeDropdowns(allocsDiv);
           };
 
           const kindSel = content.querySelector('select[name=kind]');
@@ -618,23 +1582,37 @@
             apiList('/api/vendors'),
           ]);
 
-          const fsOptions = [{ value: '', label: '(any funding source)' }].concat(fundingSources.map(fs => ({ value: fs.id, label: fs.name })));
-          const projectOptions = [{ value: '', label: '(any project)' }].concat(projects.map(p => ({ value: p.id, label: p.name })));
-          const vendorOptions = [{ value: '', label: '(any vendor)' }].concat(vendors.map(v => ({ value: v.id, label: v.name })));
+          const fundingSourceHandlers = { key: 'funding-source', ...buildResourceDropdownHandlers('/api/funding-sources', {
+            formatLabel: (fs) => fs.name,
+            matcherFields: ['name'],
+          }) };
+          const fsOptions = [{ value: '', label: '(any funding source)', raw: null }].concat(fundingSources.map(fs => ({ value: fs.id, label: fs.name, raw: fs })));
+          const projectHandlers = { key: 'project', ...buildResourceDropdownHandlers('/api/projects', {
+            formatLabel: (p) => p.name,
+            matcherFields: ['code', 'line'],
+            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
+          }) };
+          const projectOptions = [{ value: '', label: '(any project)', raw: null }].concat(projects.map(p => ({ value: p.id, label: p.name, raw: p })));
+          const vendorHandlers = { key: 'vendor', ...buildResourceDropdownHandlers('/api/vendors', {
+            formatLabel: (v) => v.name,
+            matcherFields: ['name'],
+          }) };
+          const vendorOptions = [{ value: '', label: '(any vendor)', raw: null }].concat(vendors.map(v => ({ value: v.id, label: v.name, raw: v })));
+          const paymentStatusOptions = [
+            { value: '', label: '(any)' },
+            { value: 'PLANNED', label: 'PLANNED' },
+            { value: 'DUE', label: 'DUE' },
+            { value: 'PAID', label: 'PAID' },
+            { value: 'CANCELLED', label: 'CANCELLED' },
+          ];
 
           content.innerHTML = `
             ${card('Payment Schedule Filters', `
               <div class="row four">
-                ${field('payment_fs', labelFor('payment_fs', 'Funding Source'), select('payment_fs', fsOptions))}
-                ${field('payment_project', labelFor('payment_project', 'Project'), select('payment_project', projectOptions))}
-                ${field('payment_vendor', labelFor('payment_vendor', 'Vendor'), select('payment_vendor', vendorOptions))}
-                ${field('payment_status', labelFor('payment_status', 'Status'), `<select name="payment_status">
-                    <option value="">(any)</option>
-                    <option value="PLANNED">PLANNED</option>
-                    <option value="DUE">DUE</option>
-                    <option value="PAID">PAID</option>
-                    <option value="CANCELLED">CANCELLED</option>
-                  </select>`)}
+                ${field('payment_fs', labelFor('payment_fs', 'Funding Source'), select('payment_fs', fsOptions, { ...fundingSourceHandlers }))}
+                ${field('payment_project', labelFor('payment_project', 'Project'), select('payment_project', projectOptions, { ...projectHandlers }))}
+                ${field('payment_vendor', labelFor('payment_vendor', 'Vendor'), select('payment_vendor', vendorOptions, { ...vendorHandlers }))}
+                ${field('payment_status', labelFor('payment_status', 'Status'), select('payment_status', paymentStatusOptions, { allowCreate: false, allowEdit: false, allowDelete: false }))}
               </div>
               <div class="row three">
                 ${field('payment_due_from', labelFor('payment_due_from', 'Due From'), `<input type="date" name="payment_due_from" class="input" />`)}
@@ -651,6 +1629,8 @@
             `)}
             <div id="paymentsTable" class="card"></div>
           `;
+
+          initializeDropdowns(content);
 
           const filters = {
             fs: content.querySelector('select[name=payment_fs]'),
@@ -767,13 +1747,19 @@
             ApiNew.listCheckpointTypes(),
           ]);
 
-          const poOptions = [{ value: '', label: '(select PO)' }].concat(purchaseOrders.map(po => ({ value: po.id, label: `${po.po_number} (${po.currency})` })));
+          const poOptions = [{ value: '', label: '(select PO)', raw: null }].concat(purchaseOrders.map(po => ({ value: po.id, label: `${po.po_number} (${po.currency})`, raw: po })));
+          const poHandlers = { key: 'purchase-order', ...buildResourceDropdownHandlers('/api/purchase-orders', {
+            formatLabel: (po) => `${po.po_number} (${po.currency})`,
+            matcherFields: ['po_number', 'currency'],
+          }) };
+          const lineHandlers = { allowCreate: false, allowEdit: false, allowDelete: false };
+          const baseLineOptions = [{ value: '', label: '(select line)', raw: null }];
 
           content.innerHTML = `
             ${card('Deliverables & Milestones', `
               <div class="row three">
-                ${field('deliverable_po', labelFor('deliverable_po','Purchase Order'), select('deliverable_po', poOptions))}
-                ${field('deliverable_po_line', labelFor('deliverable_po_line','PO Line'), '<select name="deliverable_po_line"><option value="">(select line)</option></select>')}
+                ${field('deliverable_po', labelFor('deliverable_po','Purchase Order'), select('deliverable_po', poOptions, { ...poHandlers }))}
+                ${field('deliverable_po_line', labelFor('deliverable_po_line','PO Line'), select('deliverable_po_line', baseLineOptions, lineHandlers))}
                 <div class="field"><label>&nbsp;</label><button id="refreshDeliverables">Load Lots</button></div>
               </div>
               <div class="row two">
@@ -784,18 +1770,36 @@
             <div id="deliverablesPanel" class="card"><em>Select a PO line to view lots and milestones.</em></div>
           `;
 
+          initializeDropdowns(content);
+
           const poSelect = content.querySelector('select[name=deliverable_po]');
           const lineSelect = content.querySelector('select[name=deliverable_po_line]');
           const panel = document.getElementById('deliverablesPanel');
 
           function populateLines(poId){
             const po = purchaseOrders.find(p => p.id === Number(poId));
-            if (!po) {
-              lineSelect.innerHTML = '<option value="">(select line)</option>';
-              return;
+            const dropdown = lineSelect && lineSelect.__dropdown;
+            const options = po
+              ? [{ value: '', label: '(all lines)', raw: null }].concat(po.lines.map(line => ({
+                  value: line.id,
+                  label: `${line.description || 'Line'} — Qty ${line.quantity || 0}`,
+                  raw: line,
+                })))
+              : baseLineOptions.slice();
+            if (dropdown) {
+              dropdown.options = options;
+              dropdown.optionMap = new Map(options.map(opt => [String(opt.value), opt]));
+              lineSelect.innerHTML = options.map(opt => `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`).join('');
+              dropdown.filterOptions('');
+              const current = dropdown.optionMap.get(lineSelect.value);
+              if (!current) {
+                dropdown.selected = null;
+                lineSelect.value = '';
+                dropdown.inputEl.value = '';
+              }
+            } else {
+              lineSelect.innerHTML = options.map(opt => `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`).join('');
             }
-            const opts = po.lines.map(line => `<option value="${line.id}">${line.description || 'Line'} — Qty ${line.quantity || 0}</option>`);
-            lineSelect.innerHTML = '<option value="">(all lines)</option>' + opts.join('');
           }
 
           poSelect.addEventListener('change', () => {
@@ -923,6 +1927,8 @@
 
           const savedReports = await ApiNew.listReports();
 
+          const viewOptions = views.map(v => ({ value: v.value, label: v.label, raw: v }));
+
           content.innerHTML = `
             <div class="row">
               <div class="card" style="flex:1">
@@ -943,7 +1949,7 @@
                 </div>
                 <div class="field">
                   ${labelFor('reportView','Base View','Underlying SQL view to query.')}
-                  <select id="reportView">${views.map(v => `<option value="${v.value}">${v.label}</option>`).join('')}</select>
+                  ${select('reportView', viewOptions, { allowCreate: false, allowEdit: false, allowDelete: false })}
                 </div>
                 <div class="row two">
                   <div class="field">
@@ -967,6 +1973,8 @@
             </div>
             <div id="reportResult" class="card"><em>Run or select a report to see data.</em></div>
           `;
+
+          initializeDropdowns(content);
 
           const reportList = document.getElementById('reportList');
           const resultPanel = document.getElementById('reportResult');
@@ -1012,7 +2020,9 @@
               if (!report) return;
               document.getElementById('reportName').value = report.name;
               document.getElementById('reportOwner').value = report.owner;
-              document.getElementById('reportView').value = report.json_config.view || views[0].value;
+              const viewSelect = document.getElementById('reportView');
+              viewSelect.value = report.json_config.view || views[0].value;
+              viewSelect.dispatchEvent(new Event('change', { bubbles: true }));
               document.getElementById('reportDims').value = (report.json_config.dimensions || []).join(',');
               document.getElementById('reportMeasures').value = (report.json_config.measures || []).join(',');
               document.getElementById('reportFilters').value = report.json_config.filters ? JSON.stringify(report.json_config.filters) : '';
@@ -1178,7 +2188,25 @@
           const projectMap = mapBy(projects);
           const categoryMap = mapBy(categories);
           const vendorMap = mapBy(vendors);
-          const portfolioOpts = [{value:'',label:'(All Funding Sources)'}].concat(fundingSources.map(c=>({value:c.id,label:`${c.name}${c.closure_date ? ' • closes '+c.closure_date : ''}`})));
+          const fundingSourceHandlers = { key: 'funding-source', ...buildResourceDropdownHandlers('/api/funding-sources', {
+            formatLabel: (fs) => `${fs.name}${fs.closure_date ? ' • closes ' + fs.closure_date : ''}`,
+            matcherFields: ['name'],
+          }) };
+          const portfolioOpts = [{ value: '', label: '(All Funding Sources)', raw: null }].concat(
+            fundingSources.map(c => ({ value: c.id, label: `${c.name}${c.closure_date ? ' • closes ' + c.closure_date : ''}`, raw: c }))
+          );
+          const scenarioOptions = [
+            { value: 'actual', label: 'Actual' },
+          ];
+          const pivotByOptions = [
+            { value: '', label: 'Detailed (funding source • project • category • vendor)' },
+            { value: 'portfolio', label: 'By Funding Source' },
+            { value: 'project', label: 'By Project' },
+            { value: 'group', label: 'By Project Group' },
+            { value: 'category', label: 'By Category' },
+            { value: 'vendor', label: 'By Vendor' },
+            { value: 'state', label: 'By State (Forecast/Commitment/etc)' },
+          ];
 
           const ui = document.createElement('div');
           ui.innerHTML = `
@@ -1187,25 +2215,15 @@
               <div class="row three">
                 <div class="field">
                   ${labelFor('scenario','Scenario','Ledger-backed — ideal scenario pending future backfill.')}
-                  <select name="scenario">
-                    <option value="actual">Actual</option>
-                  </select>
+                  ${select('scenario', scenarioOptions, { allowCreate: false, allowEdit: false, allowDelete: false })}
                 </div>
                 <div class="field">
                   ${labelFor('by','Pivot By','Choose grouping for the pivot table below.')}
-                  <select name="by">
-                    <option value="">Detailed (funding source • project • category • vendor)</option>
-                    <option value="portfolio">By Funding Source</option>
-                    <option value="project">By Project</option>
-                    <option value="group">By Project Group</option>
-                    <option value="category">By Category</option>
-                    <option value="vendor">By Vendor</option>
-                    <option value="state">By State (Forecast/Commitment/etc)</option>
-                  </select>
+                  ${select('by', pivotByOptions, { allowCreate: false, allowEdit: false, allowDelete: false })}
                 </div>
                 <div class="field">
                   ${labelFor('portfolioFilter','Funding Source Filter','Pick a funding source to narrow results and show category health.')}
-                  ${select('portfolioFilter', portfolioOpts)}
+                  ${select('portfolioFilter', portfolioOpts, { ...fundingSourceHandlers })}
                 </div>
               </div>
             </div>
@@ -1214,6 +2232,8 @@
             <div id="health"></div>
           `;
           content.innerHTML = ui.outerHTML;
+
+          initializeDropdowns(content);
 
           const groupMap = {
             '': 'funding_source,project,category,vendor,currency',
@@ -1401,7 +2421,10 @@
                 ${field('name', labelFor('name','Tag','Freeform label to group entries for ad-hoc reporting.'), input('name','long-lead'))}
                 <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
               </div>`)
-            + card('All Tags', table(tags, ['id','name'], '/api/tags'));
+            + card('All Tags', table(tags, [
+              { key: 'id', label: 'ID' },
+              { key: 'name', label: 'Tag Name' },
+            ], '/api/tags'));
           const add = document.getElementById('add');
           if (add) add.onclick = async ()=>{
             const name = content.querySelector('input[name=name]').value;
