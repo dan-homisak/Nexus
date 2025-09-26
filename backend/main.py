@@ -1,6 +1,6 @@
 from pathlib import Path
 from datetime import date as DateType
-import os, time
+import os, time, types
 from typing import Optional
 from fastapi import BackgroundTasks
 from fastapi import FastAPI, Depends, HTTPException
@@ -12,6 +12,7 @@ from .db import Base, engine, get_db
 from . import models, schemas, models_finance  # noqa: F401 - ensure models are registered
 from .routes_finance import router as finance_router
 from .csv_io import export_to_csv, import_latest_csv
+from .sql.views import ensure_views
 
 app = FastAPI()
 app.add_middleware(
@@ -34,6 +35,7 @@ def quit_app(background_tasks: BackgroundTasks):
 
 # --- Create tables (dev) ---
 Base.metadata.create_all(bind=engine)
+ensure_views(engine)
 
 # --- Utility ---
 def get_or_404(db, model, obj_id: int):
@@ -476,5 +478,23 @@ def health(
     return out
 
 # --- Mount frontend (LAST) ---
+
+
+class No304StaticFiles(StaticFiles):
+    """Static files handler that always re-serves assets instead of returning 304."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code=status_code)
+        if hasattr(response, "is_not_modified"):
+            response.is_not_modified = types.MethodType(lambda self, headers: False, response)
+        if hasattr(response, "headers"):
+            headers = response.headers
+            headers["Cache-Control"] = "no-store"
+            for header_name in ("etag", "last-modified"):
+                if header_name in headers:
+                    del headers[header_name]
+        return response
+
+
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+app.mount("/", No304StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

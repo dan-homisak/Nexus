@@ -8,6 +8,8 @@ new UI.
 from __future__ import annotations
 
 from textwrap import dedent
+import threading
+import weakref
 
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
@@ -139,6 +141,40 @@ VIEW_DEFINITIONS = {
         """
     ),
 }
+
+
+_VIEW_APPLY_LOCK = threading.Lock()
+_APPLIED_ENGINES: "weakref.WeakSet[Engine]" = weakref.WeakSet()
+
+
+def ensure_views(bind) -> None:
+    """Apply views once per engine to avoid dropping them mid-request."""
+
+    engine: Engine
+    if isinstance(bind, Session):
+        engine = bind.bind  # type: ignore[assignment]
+        if engine is None:
+            raise RuntimeError("Cannot ensure views without a bound engine")
+    elif isinstance(bind, Connection):
+        engine = bind.engine
+    elif isinstance(bind, Engine):
+        engine = bind
+    else:
+        engine = bind
+
+    # When tests use raw sqlite3 connection, skip caching and just apply.
+    if not isinstance(engine, Engine):
+        apply_views(bind)
+        return
+
+    if engine in _APPLIED_ENGINES:
+        return
+
+    with _VIEW_APPLY_LOCK:
+        if engine in _APPLIED_ENGINES:
+            return
+        apply_views(engine)
+        _APPLIED_ENGINES.add(engine)
 
 
 def apply_views(bind) -> None:

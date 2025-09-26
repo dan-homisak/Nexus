@@ -39,7 +39,7 @@ from .schemas_finance import (
     CheckpointTypeOut,
 )
 from .schemas_finance import MilestoneOut
-from .sql.views import apply_views
+from .sql.views import ensure_views
 
 router = APIRouter(prefix="/api", tags=["finance"])
 
@@ -134,7 +134,7 @@ def _fetch_view_rows(
     where_clauses: list[str],
     params: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    apply_views(db.bind)
+    ensure_views(db.bind)
     sql = f"SELECT * FROM {view_name}"
     if where_clauses:
         sql += " WHERE " + " AND ".join(where_clauses)
@@ -1392,7 +1392,7 @@ def run_report(report_id: int, db: Session = Depends(get_db)):
     view_name = report.json_config.get("view")
     if not view_name:
         raise HTTPException(status_code=400, detail="Report missing view name in json_config")
-    apply_views(db.bind)
+    ensure_views(db.bind)
     rows = [dict(r._mapping) for r in db.execute(text(f"SELECT * FROM {view_name}"))]
     return SavedReportResult(rows=rows, generated_at=dt.datetime.utcnow())
 
@@ -1402,6 +1402,6 @@ def run_report_adhoc(payload: ReportRunIn, db: Session = Depends(get_db)):
     view_name = payload.json_config.get("view")
     if not view_name:
         raise HTTPException(status_code=400, detail="json_config.view is required")
-    apply_views(db.bind)
+    ensure_views(db.bind)
     rows = [dict(r._mapping) for r in db.execute(text(f"SELECT * FROM {view_name}"))]
     return SavedReportResult(rows=rows, generated_at=dt.datetime.utcnow())
