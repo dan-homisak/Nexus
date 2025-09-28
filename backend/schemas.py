@@ -76,10 +76,64 @@ class AllocationIn(BaseModel):
 class TagIn(BaseModel):
     name: str
 
+
 class TagOut(TagIn):
     id: int
     class Config:
         from_attributes = True
+
+
+# ---- Journals ----
+class JournalPostingIn(BaseModel):
+    allocation_id: Optional[int] = None
+    budget_id: Optional[int] = None
+    item_project_id: Optional[int] = None
+    category_id: Optional[int] = None
+    amount: float
+    currency: Optional[str] = "USD"
+
+
+class JournalEntryIn(BaseModel):
+    kind: str
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+    postings: List[JournalPostingIn]
+
+
+class JournalPostingOut(JournalPostingIn):
+    id: int
+    journal_id: int
+    created_at: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class JournalEntryOut(BaseModel):
+    id: int
+    kind: str
+    posted_at: Optional[str] = None
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: Optional[str] = None
+    net_amount: float
+    balanced: bool
+    postings: List[JournalPostingOut]
+    model_config = ConfigDict(from_attributes=True)
+
+
+
+class JournalReallocateIn(BaseModel):
+    from_allocation_id: int
+    to_allocation_id: int
+    amount: float
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class JournalAdjustIn(BaseModel):
+    postings: List[JournalPostingIn]
+    note: Optional[str] = None
+    created_by: Optional[str] = None
+
 
 class EntryIn(BaseModel):
     date: Optional[str] = None

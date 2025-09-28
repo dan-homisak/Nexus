@@ -1,9 +1,10 @@
 from pathlib import Path
 from datetime import date as DateType
+from decimal import Decimal
 import os, time, types
-from typing import Optional
+from typing import List, Optional
 from fastapi import BackgroundTasks
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -43,6 +44,111 @@ def get_or_404(db, model, obj_id: int):
     if not obj:
         raise HTTPException(404, f"{model.__name__} {obj_id} not found")
     return obj
+
+JOURNAL_KINDS = {"REALLOC", "ADJUST", "CORRECTION"}
+ZERO_TOLERANCE = Decimal('0.000001')
+
+
+def _serialize_journal(entry: models.JournalEntry) -> schemas.JournalEntryOut:
+    postings = [
+        schemas.JournalPostingOut(
+            id=p.id,
+            journal_id=p.journal_id,
+            allocation_id=p.allocation_id,
+            budget_id=p.budget_id,
+            item_project_id=p.item_project_id,
+            category_id=p.category_id,
+            amount=float(p.amount),
+            currency=p.currency,
+            created_at=p.created_at.isoformat() if p.created_at else None,
+        )
+        for p in entry.postings
+    ]
+    return schemas.JournalEntryOut(
+        id=entry.id,
+        kind=entry.kind,
+        posted_at=entry.posted_at.isoformat() if entry.posted_at else None,
+        note=entry.note,
+        created_by=entry.created_by,
+        created_at=entry.created_at.isoformat() if entry.created_at else None,
+        net_amount=float(entry.net_amount),
+        balanced=entry.balanced,
+        postings=postings,
+    )
+
+
+def _prepare_journal_postings(db: Session, postings: List[schemas.JournalPostingIn]):
+    if not postings:
+        raise HTTPException(422, "at least one posting required")
+    rows = []
+    total = Decimal('0')
+    for posting in postings:
+        amount = Decimal(str(posting.amount))
+        if amount == 0:
+            raise HTTPException(422, "posting amount cannot be zero")
+        currency = (posting.currency or "USD").upper()
+        if posting.allocation_id:
+            if any(v is not None for v in (posting.budget_id, posting.item_project_id, posting.category_id)):
+                raise HTTPException(422, "allocation postings cannot specify budget/item/category")
+            alloc = get_or_404(db, models.Allocation, posting.allocation_id)
+            rows.append({
+                "allocation_id": alloc.id,
+                "budget_id": None,
+                "item_project_id": None,
+                "category_id": None,
+                "amount": amount,
+                "currency": currency,
+            })
+        else:
+            if not (posting.budget_id and posting.item_project_id and posting.category_id):
+                raise HTTPException(422, "budget_id, item_project_id, category_id required when allocation_id is null")
+            category = get_or_404(db, models.Category, posting.category_id)
+            if category.budget_id != posting.budget_id or category.item_project_id != posting.item_project_id:
+                raise HTTPException(422, "category does not match provided budget/item_project")
+            rows.append({
+                "allocation_id": None,
+                "budget_id": posting.budget_id,
+                "item_project_id": posting.item_project_id,
+                "category_id": posting.category_id,
+                "amount": amount,
+                "currency": currency,
+            })
+        total += amount
+    if abs(total) > ZERO_TOLERANCE:
+        raise HTTPException(422, "journal postings must net to zero")
+    return rows
+
+def _create_journal(
+    db: Session,
+    *,
+    kind: str,
+    note: Optional[str],
+    created_by: Optional[str],
+    postings: List[schemas.JournalPostingIn],
+) -> models.JournalEntry:
+    kind_upper = kind.upper()
+    if kind_upper not in JOURNAL_KINDS:
+        raise HTTPException(422, "invalid journal kind")
+    rows = _prepare_journal_postings(db, postings)
+    entry = models.JournalEntry(kind=kind_upper, note=note, created_by=created_by)
+    db.add(entry)
+    db.flush()
+    for row in rows:
+        db.add(
+            models.JournalPosting(
+                journal_id=entry.id,
+                allocation_id=row['allocation_id'],
+                budget_id=row['budget_id'],
+                item_project_id=row['item_project_id'],
+                category_id=row['category_id'],
+                amount=row['amount'],
+                currency=row['currency'],
+            )
+        )
+    db.commit()
+    entry = db.get(models.JournalEntry, entry.id)
+    entry.postings  # evaluate relationship
+    return entry
 
 # --- CSV Snapshots ---
 @app.post("/api/load-latest")
@@ -281,48 +387,13 @@ def create_entry(e: schemas.EntryIn, db: Session = Depends(get_db)):
 
 @app.put("/api/entries/{eid}")
 def update_entry(eid: int, e: schemas.EntryIn, db: Session = Depends(get_db)):
-    m = get_or_404(db, models.Entry, eid)
-    payload = e.model_dump(exclude={"allocations", "tags"})
-    if payload.get("date") is not None:
-        try:
-            payload["date"] = DateType.fromisoformat(payload["date"])
-        except Exception:
-            raise HTTPException(400, "date must be ISO format YYYY-MM-DD")
-
-    for k, v in payload.items():
-        setattr(m, k, v)
-
-    # replace allocations
-    db.query(models.Allocation).filter(models.Allocation.entry_id == eid).delete()
-    if e.allocations:
-        total = 0.0
-        for a in e.allocations:
-            db.add(models.Allocation(entry_id=eid, portfolio_id=a.portfolio_id, amount=a.amount))
-            total += a.amount
-        if abs(total - e.amount) > 1e-6:
-            raise HTTPException(400, "Allocations must sum to entry amount")
-
-    # replace tags
-    db.query(models.EntryTag).filter(models.EntryTag.entry_id == eid).delete()
-    if e.tags:
-        for t in e.tags:
-            tname = (t or "").strip()
-            if not tname:
-                continue
-            tag = db.execute(select(models.Tag).where(models.Tag.name == tname)).scalar_one_or_none()
-            if not tag:
-                tag = models.Tag(name=tname)
-                db.add(tag); db.flush()
-            db.add(models.EntryTag(entry_id=eid, tag_id=tag.id))
-
-    db.commit(); db.refresh(m)
-    return m
+    get_or_404(db, models.Entry, eid)
+    raise HTTPException(409, "entries are append-only; use journals")
 
 @app.delete("/api/entries/{eid}")
 def delete_entry(eid: int, db: Session = Depends(get_db)):
-    m = get_or_404(db, models.Entry, eid)
-    db.delete(m); db.commit()
-    return {"ok": True}
+    get_or_404(db, models.Entry, eid)
+    raise HTTPException(409, "entries are append-only; use journals")
 
 @app.get("/api/allocations")
 def list_allocs(db: Session = Depends(get_db)):
@@ -361,6 +432,72 @@ def delete_project_group(pg_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 # --- Pivots: generic summary (unchanged) ---
+@app.post("/api/journals", response_model=schemas.JournalEntryOut)
+def create_journal_entry(payload: schemas.JournalEntryIn, db: Session = Depends(get_db)):
+    entry = _create_journal(
+        db,
+        kind=payload.kind,
+        note=payload.note,
+        created_by=payload.created_by,
+        postings=payload.postings,
+    )
+    return _serialize_journal(entry)
+
+
+@app.get("/api/journals/{journal_id}", response_model=schemas.JournalEntryOut)
+def get_journal(journal_id: int, db: Session = Depends(get_db)):
+    entry = get_or_404(db, models.JournalEntry, journal_id)
+    entry.postings
+    return _serialize_journal(entry)
+
+
+@app.get("/api/journals", response_model=List[schemas.JournalEntryOut])
+def list_journals(
+    kind: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    stmt = select(models.JournalEntry)
+    if kind:
+        stmt = stmt.where(models.JournalEntry.kind == kind.upper())
+    stmt = stmt.order_by(models.JournalEntry.posted_at.desc(), models.JournalEntry.id.desc()).limit(limit)
+    entries = db.execute(stmt).scalars().all()
+    return [_serialize_journal(entry) for entry in entries]
+
+
+@app.post("/api/journals/reallocate", response_model=schemas.JournalEntryOut)
+def journal_reallocate(payload: schemas.JournalReallocateIn, db: Session = Depends(get_db)):
+    amount = Decimal(str(payload.amount))
+    if amount <= 0:
+        raise HTTPException(422, "amount must be positive")
+    from_alloc = get_or_404(db, models.Allocation, payload.from_allocation_id)
+    to_alloc = get_or_404(db, models.Allocation, payload.to_allocation_id)
+    postings = [
+        schemas.JournalPostingIn(allocation_id=from_alloc.id, amount=float(-amount), currency="USD"),
+        schemas.JournalPostingIn(allocation_id=to_alloc.id, amount=float(amount), currency="USD"),
+    ]
+    entry = _create_journal(
+        db,
+        kind="REALLOC",
+        note=payload.note,
+        created_by=payload.created_by,
+        postings=postings,
+    )
+    return _serialize_journal(entry)
+
+
+@app.post("/api/journals/adjust", response_model=schemas.JournalEntryOut)
+def journal_adjust(payload: schemas.JournalAdjustIn, db: Session = Depends(get_db)):
+    entry = _create_journal(
+        db,
+        kind="ADJUST",
+        note=payload.note,
+        created_by=payload.created_by,
+        postings=payload.postings,
+    )
+    return _serialize_journal(entry)
+
+
 @app.get("/api/pivot/summary")
 def pivot_summary(
     by: Optional[str] = None,

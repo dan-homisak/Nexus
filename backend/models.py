@@ -1,5 +1,6 @@
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -11,7 +12,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    select,
 )
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -202,34 +205,93 @@ class Allocation(Base):
     entry = relationship("Entry", back_populates="allocations")
     category = relationship("Category", back_populates="allocations")
     item_project = relationship("Project", back_populates="allocations")
+    postings = relationship(
+        "JournalPosting",
+        back_populates="allocation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    @hybrid_property
+    def adjustment_delta(self):
+        return sum(p.amount for p in self.postings) if self.postings else 0
+
+    @adjustment_delta.expression
+    def adjustment_delta(cls):
+        return (
+            select(func.coalesce(func.sum(JournalPosting.amount), 0))
+            .where(JournalPosting.allocation_id == cls.id)
+            .scalar_subquery()
+        )
+
+    @hybrid_property
+    def effective_amount(self):
+        return (self.amount or 0) + self.adjustment_delta
+
+    @effective_amount.expression
+    def effective_amount(cls):
+        return cls.amount + cls.adjustment_delta
 
 
 class JournalEntry(Base):
     __tablename__ = "journal_entries"
+    __table_args__ = (
+        CheckConstraint("kind IN ('REALLOC','ADJUST','CORRECTION')", name="ck_journal_entries_kind"),
+    )
+
     id = Column(Integer, primary_key=True)
-    source_entry_id = Column(Integer, ForeignKey("entries.id"), nullable=True)
-    created_at = Column(DateTime, server_default=func.current_timestamp(), nullable=False)
-    created_by = Column(String)
-    notes = Column(Text)
+    kind = Column(String(16), nullable=False)
+    posted_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+    note = Column(Text)
+    created_by = Column(String(100))
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
     postings = relationship("JournalPosting", back_populates="journal_entry", cascade="all, delete-orphan")
+
+    @hybrid_property
+    def net_amount(self):
+        return sum(p.amount for p in self.postings) if self.postings else 0
+
+    @net_amount.expression
+    def net_amount(cls):
+        return (
+            select(func.coalesce(func.sum(JournalPosting.amount), 0))
+            .where(JournalPosting.journal_id == cls.id)
+            .scalar_subquery()
+        )
+
+    @property
+    def balanced(self) -> bool:
+        return abs(float(self.net_amount)) < 1e-6
 
 
 class JournalPosting(Base):
     __tablename__ = "journal_postings"
+    __table_args__ = (
+        CheckConstraint(
+            "(allocation_id IS NOT NULL AND budget_id IS NULL AND item_project_id IS NULL AND category_id IS NULL)"
+            " OR (allocation_id IS NULL AND budget_id IS NOT NULL AND item_project_id IS NOT NULL AND category_id IS NOT NULL)",
+            name="ck_journal_postings_target",
+        ),
+    )
+
     id = Column(Integer, primary_key=True)
-    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id", ondelete="CASCADE"), nullable=False)
-    allocation_id = Column(Integer, ForeignKey("allocations.id"), nullable=True)
-    item_project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
-    category_id = Column(Integer, ForeignKey("categories.id"), nullable=False)
-    budget_id = Column(Integer, ForeignKey("funding_sources.id"), nullable=False)
+    journal_id = Column(Integer, ForeignKey("journal_entries.id", ondelete="CASCADE"), nullable=False)
+    allocation_id = Column(Integer, ForeignKey("allocations.id", ondelete="SET NULL"), nullable=True)
+    budget_id = Column(Integer, ForeignKey("funding_sources.id", ondelete="CASCADE"), nullable=True)
+    item_project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
+    category_id = Column(Integer, ForeignKey("categories.id", ondelete="CASCADE"), nullable=True)
     amount = Column(Numeric(18, 2), nullable=False)
-    posted_at = Column(DateTime, server_default=func.current_timestamp(), nullable=False)
-    created_at = Column(DateTime, server_default=func.current_timestamp(), nullable=False)
+    currency = Column(String(10), nullable=False, server_default="USD")
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
     journal_entry = relationship("JournalEntry", back_populates="postings")
+    allocation = relationship("Allocation", back_populates="postings")
+    item_project = relationship("Project")
+    category = relationship("Category")
 
 
+class Comment(Base):
 class Comment(Base):
     __tablename__ = "comments"
     id = Column(Integer, primary_key=True)
