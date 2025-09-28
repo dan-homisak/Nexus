@@ -8,7 +8,6 @@ from decimal import Decimal
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import orm, text, select
-from sqlalchemy.orm import joinedload
 
 from backend import models, models_finance  # noqa: F401 - ensure metadata loads
 from backend.scripts.reconcile_ledgers import reconcile_ledgers
@@ -264,53 +263,45 @@ AFTER INSERT ON categories
 BEGIN
     UPDATE categories
     SET is_leaf = CASE
-        WHEN NOT EXISTS (SELECT 1 FROM categories child WHERE child.parent_id = categories.id) THEN 1
-        ELSE 0 END,
+            WHEN NOT EXISTS (
+                SELECT 1 FROM categories child
+                WHERE child.parent_id = categories.id
+            )
+            THEN 1 ELSE 0 END,
         amount_leaf = CASE
-            WHEN NOT EXISTS (SELECT 1 FROM categories child WHERE child.parent_id = categories.id) THEN amount_leaf
-            ELSE NULL END
+            WHEN NOT EXISTS (
+                SELECT 1 FROM categories child
+                WHERE child.parent_id = categories.id
+            )
+            THEN amount_leaf ELSE NULL END
     WHERE budget_id = NEW.budget_id;
-
-    WITH RECURSIVE tree(id, parent_id, name, budget_id, path_ids, path_names, depth) AS (
-        SELECT id, parent_id, name, budget_id,
-               json_array(id) AS path_ids,
-               json_array(name) AS path_names,
-               0 AS depth
-        FROM categories
-        WHERE parent_id IS NULL AND budget_id = NEW.budget_id
-        UNION ALL
-        SELECT child.id, child.parent_id, child.name, child.budget_id,
-               json_insert(tree.path_ids, '$[#]', child.id),
-               json_insert(tree.path_names, '$[#]', child.name),
-               tree.depth + 1
-        FROM categories child
-        JOIN tree ON child.parent_id = tree.id
-        WHERE child.budget_id = NEW.budget_id
-    )
-    UPDATE categories
-    SET path_ids = tree.path_ids,
-        path_names = tree.path_names,
-        path_depth = tree.depth
-    WHERE categories.id = tree.id;
 
     UPDATE categories
     SET rollup_amount = (
-        SELECT SUM(COALESCE(leaf.amount_leaf,0))
-        FROM categories leaf
-        WHERE leaf.budget_id = NEW.budget_id
-          AND leaf.is_leaf = 1
-          AND (leaf.id = categories.id OR EXISTS (
-              SELECT 1 FROM json_each(leaf.path_ids) WHERE value = categories.id
-          ))
+        WITH RECURSIVE subtree(id) AS (
+            SELECT categories.id
+            UNION ALL
+            SELECT c.id
+            FROM categories c
+            JOIN subtree s ON c.parent_id = s.id
+        )
+        SELECT COALESCE(SUM(x.amount_leaf), 0)
+        FROM categories x
+        WHERE x.is_leaf = 1
+          AND x.id IN (SELECT id FROM subtree)
     )
     WHERE budget_id = NEW.budget_id;
 
-    UPDATE funding_sources SET
-        budget_amount_cache = CASE WHEN is_cost_center THEN NULL ELSE (
-            SELECT SUM(COALESCE(amount_leaf,0))
-            FROM categories leaf
-            WHERE leaf.budget_id = NEW.budget_id AND leaf.is_leaf = 1
-        ) END,
+    UPDATE funding_sources
+    SET budget_amount_cache = CASE
+            WHEN is_cost_center THEN NULL
+            ELSE (
+                SELECT COALESCE(SUM(leaf.amount_leaf), 0)
+                FROM categories leaf
+                WHERE leaf.budget_id = NEW.budget_id
+                  AND leaf.is_leaf = 1
+            )
+        END,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = NEW.budget_id;
 END;
@@ -322,53 +313,45 @@ AFTER DELETE ON categories
 BEGIN
     UPDATE categories
     SET is_leaf = CASE
-        WHEN NOT EXISTS (SELECT 1 FROM categories child WHERE child.parent_id = categories.id) THEN 1
-        ELSE 0 END,
+            WHEN NOT EXISTS (
+                SELECT 1 FROM categories child
+                WHERE child.parent_id = categories.id
+            )
+            THEN 1 ELSE 0 END,
         amount_leaf = CASE
-            WHEN NOT EXISTS (SELECT 1 FROM categories child WHERE child.parent_id = categories.id) THEN amount_leaf
-            ELSE NULL END
+            WHEN NOT EXISTS (
+                SELECT 1 FROM categories child
+                WHERE child.parent_id = categories.id
+            )
+            THEN amount_leaf ELSE NULL END
     WHERE budget_id = OLD.budget_id;
-
-    WITH RECURSIVE tree(id, parent_id, name, budget_id, path_ids, path_names, depth) AS (
-        SELECT id, parent_id, name, budget_id,
-               json_array(id) AS path_ids,
-               json_array(name) AS path_names,
-               0 AS depth
-        FROM categories
-        WHERE parent_id IS NULL AND budget_id = OLD.budget_id
-        UNION ALL
-        SELECT child.id, child.parent_id, child.name, child.budget_id,
-               json_insert(tree.path_ids, '$[#]', child.id),
-               json_insert(tree.path_names, '$[#]', child.name),
-               tree.depth + 1
-        FROM categories child
-        JOIN tree ON child.parent_id = tree.id
-        WHERE child.budget_id = OLD.budget_id
-    )
-    UPDATE categories
-    SET path_ids = tree.path_ids,
-        path_names = tree.path_names,
-        path_depth = tree.depth
-    WHERE categories.id = tree.id;
 
     UPDATE categories
     SET rollup_amount = (
-        SELECT SUM(COALESCE(leaf.amount_leaf,0))
-        FROM categories leaf
-        WHERE leaf.budget_id = OLD.budget_id
-          AND leaf.is_leaf = 1
-          AND (leaf.id = categories.id OR EXISTS (
-              SELECT 1 FROM json_each(leaf.path_ids) WHERE value = categories.id
-          ))
+        WITH RECURSIVE subtree(id) AS (
+            SELECT categories.id
+            UNION ALL
+            SELECT c.id
+            FROM categories c
+            JOIN subtree s ON c.parent_id = s.id
+        )
+        SELECT COALESCE(SUM(x.amount_leaf), 0)
+        FROM categories x
+        WHERE x.is_leaf = 1
+          AND x.id IN (SELECT id FROM subtree)
     )
     WHERE budget_id = OLD.budget_id;
 
-    UPDATE funding_sources SET
-        budget_amount_cache = CASE WHEN is_cost_center THEN NULL ELSE (
-            SELECT SUM(COALESCE(amount_leaf,0))
-            FROM categories leaf
-            WHERE leaf.budget_id = OLD.budget_id AND leaf.is_leaf = 1
-        ) END,
+    UPDATE funding_sources
+    SET budget_amount_cache = CASE
+            WHEN is_cost_center THEN NULL
+            ELSE (
+                SELECT COALESCE(SUM(leaf.amount_leaf), 0)
+                FROM categories leaf
+                WHERE leaf.budget_id = OLD.budget_id
+                  AND leaf.is_leaf = 1
+            )
+        END,
         updated_at = CURRENT_TIMESTAMP
     WHERE id = OLD.budget_id;
 END;
@@ -380,55 +363,47 @@ AFTER UPDATE ON categories
 BEGIN
     UPDATE categories
     SET is_leaf = CASE
-        WHEN NOT EXISTS (SELECT 1 FROM categories child WHERE child.parent_id = categories.id) THEN 1
-        ELSE 0 END,
+            WHEN NOT EXISTS (
+                SELECT 1 FROM categories child
+                WHERE child.parent_id = categories.id
+            )
+            THEN 1 ELSE 0 END,
         amount_leaf = CASE
-            WHEN NOT EXISTS (SELECT 1 FROM categories child WHERE child.parent_id = categories.id) THEN amount_leaf
-            ELSE NULL END
-    WHERE budget_id = COALESCE(NEW.budget_id, OLD.budget_id);
-
-    WITH RECURSIVE tree(id, parent_id, name, budget_id, path_ids, path_names, depth) AS (
-        SELECT id, parent_id, name, budget_id,
-               json_array(id) AS path_ids,
-               json_array(name) AS path_names,
-               0 AS depth
-        FROM categories
-        WHERE parent_id IS NULL AND budget_id = COALESCE(NEW.budget_id, OLD.budget_id)
-        UNION ALL
-        SELECT child.id, child.parent_id, child.name, child.budget_id,
-               json_insert(tree.path_ids, '$[#]', child.id),
-               json_insert(tree.path_names, '$[#]', child.name),
-               tree.depth + 1
-        FROM categories child
-        JOIN tree ON child.parent_id = tree.id
-        WHERE child.budget_id = COALESCE(NEW.budget_id, OLD.budget_id)
-    )
-    UPDATE categories
-    SET path_ids = tree.path_ids,
-        path_names = tree.path_names,
-        path_depth = tree.depth
-    WHERE categories.id = tree.id;
+            WHEN NOT EXISTS (
+                SELECT 1 FROM categories child
+                WHERE child.parent_id = categories.id
+            )
+            THEN amount_leaf ELSE NULL END
+    WHERE budget_id IN (COALESCE(NEW.budget_id, OLD.budget_id));
 
     UPDATE categories
     SET rollup_amount = (
-        SELECT SUM(COALESCE(leaf.amount_leaf,0))
-        FROM categories leaf
-        WHERE leaf.budget_id = COALESCE(NEW.budget_id, OLD.budget_id)
-          AND leaf.is_leaf = 1
-          AND (leaf.id = categories.id OR EXISTS (
-              SELECT 1 FROM json_each(leaf.path_ids) WHERE value = categories.id
-          ))
+        WITH RECURSIVE subtree(id) AS (
+            SELECT categories.id
+            UNION ALL
+            SELECT c.id
+            FROM categories c
+            JOIN subtree s ON c.parent_id = s.id
+        )
+        SELECT COALESCE(SUM(x.amount_leaf), 0)
+        FROM categories x
+        WHERE x.is_leaf = 1
+          AND x.id IN (SELECT id FROM subtree)
     )
-    WHERE budget_id = COALESCE(NEW.budget_id, OLD.budget_id);
+    WHERE budget_id IN (COALESCE(NEW.budget_id, OLD.budget_id));
 
-    UPDATE funding_sources SET
-        budget_amount_cache = CASE WHEN is_cost_center THEN NULL ELSE (
-            SELECT SUM(COALESCE(amount_leaf,0))
-            FROM categories leaf
-            WHERE leaf.budget_id = COALESCE(NEW.budget_id, OLD.budget_id) AND leaf.is_leaf = 1
-        ) END,
+    UPDATE funding_sources
+    SET budget_amount_cache = CASE
+            WHEN is_cost_center THEN NULL
+            ELSE (
+                SELECT COALESCE(SUM(leaf.amount_leaf), 0)
+                FROM categories leaf
+                WHERE leaf.budget_id = funding_sources.id
+                  AND leaf.is_leaf = 1
+            )
+        END,
         updated_at = CURRENT_TIMESTAMP
-    WHERE id = COALESCE(NEW.budget_id, OLD.budget_id);
+    WHERE id IN (COALESCE(NEW.budget_id, OLD.budget_id));
 END;
 """
 
@@ -465,8 +440,7 @@ END;
 
 def _backfill_allocations(session: orm.Session) -> int:
     entries = session.execute(
-        select(models.Entry).options(joinedload(models.Entry.allocations))
-    ).scalars().all()
+        select(models.Entry)).scalars().all()
     allocation_rows = []
     for entry in entries:
         item_project_id = entry.item_project_id or entry.project_id
@@ -515,6 +489,14 @@ def upgrade() -> None:
         )
     )
 
+    session.execute(
+        sa.text("""
+        UPDATE funding_sources
+        SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP),
+            updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP)
+        """))
+    session.commit()
+
     # projects budget linkage
     session.execute(
         text(
@@ -526,16 +508,30 @@ def upgrade() -> None:
     # categories budget linkage
     session.execute(
         text(
-            "UPDATE categories SET budget_id = (
-                SELECT budget_id FROM projects WHERE projects.id = categories.project_id
-            )"
+            """
+            UPDATE categories
+            SET budget_id = (
+                SELECT budget_id
+                FROM projects
+                WHERE projects.id = categories.project_id
+            )
+            """
         )
     )
     session.execute(
         text(
-            "UPDATE categories SET is_leaf = CASE
-                WHEN NOT EXISTS (SELECT 1 FROM categories child WHERE child.parent_id = categories.id)
-                THEN 1 ELSE 0 END"
+            """
+            UPDATE categories
+            SET is_leaf = CASE
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM categories child
+                    WHERE child.parent_id = categories.id
+                )
+                THEN 1
+                ELSE 0
+            END
+            """
         )
     )
     session.execute(

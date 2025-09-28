@@ -117,7 +117,7 @@ class Category(Base):
 
     __tablename__ = "categories"
     __table_args__ = (
-        UniqueConstraint("name", "parent_id", "item_project_id", name="uq_cat_sibling_scope"),
+        UniqueConstraint("name", "parent_id", "project_id", name="uq_cat_sibling_scope"),
     )
 
     id = Column(Integer, primary_key=True)

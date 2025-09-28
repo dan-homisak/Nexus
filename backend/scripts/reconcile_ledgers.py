@@ -6,6 +6,7 @@ command lets operators reconcile drift (cron/nightly) and assists in tests.
 from __future__ import annotations
 
 import json
+import datetime as dt
 from collections import defaultdict
 from decimal import Decimal
 from typing import Dict, Iterable, List
@@ -86,7 +87,7 @@ def reconcile_ledgers(session: Session) -> dict:
                 budget.budget_amount_cache = None
             else:
                 budget.budget_amount_cache = total
-            budget.updated_at = None  # trigger default via SQLAlchemy on flush
+            budget.updated_at = dt.datetime.utcnow()
         updated_budgets[budget_id] = total
 
     session.commit()

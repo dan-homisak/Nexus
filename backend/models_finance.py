@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -54,12 +55,12 @@ class FundingSource(Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
     budget_amount_cache: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
     created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime,
-        server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
+        server_default=text("CURRENT_TIMESTAMP"),
+        server_onupdate=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
     created_by: Mapped[Optional[str]] = mapped_column(String(100))
