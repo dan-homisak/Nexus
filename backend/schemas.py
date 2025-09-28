@@ -33,6 +33,9 @@ class ProjectIn(BaseModel):
     group_id: Optional[int] = None
     code: Optional[str] = None
     line: Optional[str] = None
+    budget_id: Optional[int] = None
+    description: Optional[str] = None
+    legacy_portfolio_id: Optional[int] = None
 
 class ProjectOut(ProjectIn):
     id: int
@@ -43,7 +46,12 @@ class ProjectOut(ProjectIn):
 class CategoryIn(BaseModel):
     name: str
     parent_id: Optional[int] = None
-    project_id: Optional[int] = None  # NULL => global category
+    project_id: Optional[int] = None  # legacy field
+    item_project_id: Optional[int] = None
+    budget_id: Optional[int] = None
+    description: Optional[str] = None
+    amount_leaf: Optional[float] = None
+    is_leaf: Optional[bool] = None
 
 class CategoryOut(CategoryIn):
     id: int
@@ -80,6 +88,7 @@ class EntryIn(BaseModel):
     description: Optional[str] = None
     portfolio_id: int
     project_id: Optional[int] = None
+    item_project_id: Optional[int] = None
     category_id: Optional[int] = None
     vendor_id: Optional[int] = None
     po_number: Optional[str] = None

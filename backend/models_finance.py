@@ -45,10 +45,25 @@ class FundingSource(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     type: Mapped[str] = mapped_column(FundingSourceType, default="COST_CENTER", nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner: Mapped[Optional[str]] = mapped_column(String(255))
     car_code: Mapped[Optional[str]] = mapped_column(String(50))
     cc_code: Mapped[Optional[str]] = mapped_column(String(50))
     closure_date: Mapped[Optional[dt.date]] = mapped_column(Date())
     is_temporary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_cost_center: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    budget_amount_cache: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+        nullable=False,
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(String(100))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(100))
     legacy_portfolio_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True)
     legacy_fiscal_year: Mapped[Optional[str]] = mapped_column(String(20))
     legacy_owner: Mapped[Optional[str]] = mapped_column(String(255))
@@ -58,7 +73,7 @@ class FundingSource(Base):
     quotes: Mapped[list["Quote"]] = relationship(back_populates="funding_source")
 
     def __repr__(self) -> str:  # pragma: no cover - debugging helper
-        return f"<FundingSource id={self.id} type={self.type} name={self.name!r}>"
+        return f"<FundingSource id={self.id} type={self.type} name={self.name!r} is_cc={self.is_cost_center}>"
 
     @classmethod
     def ensure(cls, session, *, name: str, type: str = "COST_CENTER", **kwargs: Any) -> "FundingSource":

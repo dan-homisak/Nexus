@@ -109,14 +109,31 @@ def list_projects(db: Session = Depends(get_db)):
 
 @app.post("/api/projects")
 def create_project(p: schemas.ProjectIn, db: Session = Depends(get_db)):
-    m = models.Project(**p.model_dump())
+    data = p.model_dump()
+    budget_id = data.get("budget_id")
+    if not budget_id:
+        budget_id = data.get("portfolio_id")
+    if not budget_id:
+        raise HTTPException(400, "budget_id or portfolio_id required")
+    data["budget_id"] = budget_id
+    data.setdefault("legacy_portfolio_id", data.get("portfolio_id"))
+    m = models.Project(**data)
     db.add(m); db.commit(); db.refresh(m)
     return m
 
 @app.put("/api/projects/{pid}")
 def update_project(pid: int, p: schemas.ProjectIn, db: Session = Depends(get_db)):
     m = get_or_404(db, models.Project, pid)
-    for k, v in p.model_dump().items(): setattr(m, k, v)
+    data = p.model_dump()
+    budget_id = data.get("budget_id")
+    if not budget_id and data.get("portfolio_id"):
+        budget_id = data["portfolio_id"]
+    if budget_id:
+        data["budget_id"] = budget_id
+    data.setdefault("legacy_portfolio_id", data.get("portfolio_id", m.legacy_portfolio_id))
+    for k, v in data.items():
+        if v is not None or k in {"description", "code", "line"}:
+            setattr(m, k, v)
     db.commit(); db.refresh(m)
     return m
 
@@ -157,14 +174,31 @@ def list_categories(db: Session = Depends(get_db)):
 
 @app.post("/api/categories")
 def create_category(c: schemas.CategoryIn, db: Session = Depends(get_db)):
-    m = models.Category(**c.model_dump())
+    data = c.model_dump()
+    item_project_id = data.get("item_project_id") or data.get("project_id")
+    if not item_project_id:
+        raise HTTPException(400, "item_project_id or project_id is required")
+    project = get_or_404(db, models.Project, item_project_id)
+    data["item_project_id"] = item_project_id
+    data["budget_id"] = data.get("budget_id") or project.budget_id
+    if data.get("amount_leaf") is not None:
+        data["amount_leaf"] = float(data["amount_leaf"])
+    m = models.Category(**data)
     db.add(m); db.commit(); db.refresh(m)
     return m
 
 @app.put("/api/categories/{cid}")
 def update_category(cid: int, c: schemas.CategoryIn, db: Session = Depends(get_db)):
     m = get_or_404(db, models.Category, cid)
-    for k, v in c.model_dump().items(): setattr(m, k, v)
+    data = c.model_dump()
+    item_project_id = data.get("item_project_id") or data.get("project_id") or m.item_project_id
+    project = get_or_404(db, models.Project, item_project_id)
+    data["item_project_id"] = item_project_id
+    data["budget_id"] = data.get("budget_id") or project.budget_id
+    if data.get("amount_leaf") is not None:
+        data["amount_leaf"] = float(data["amount_leaf"])
+    for k, v in data.items():
+        setattr(m, k, v)
     db.commit(); db.refresh(m)
     return m
 
