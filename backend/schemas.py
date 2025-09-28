@@ -39,8 +39,7 @@ class ProjectIn(BaseModel):
 
 class ProjectOut(ProjectIn):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ---- Categories (n-level) ----
 class CategoryIn(BaseModel):
@@ -55,8 +54,7 @@ class CategoryIn(BaseModel):
 
 class CategoryOut(CategoryIn):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ---- Vendors ----
 class VendorIn(BaseModel):
@@ -64,8 +62,7 @@ class VendorIn(BaseModel):
 
 class VendorOut(VendorIn):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ---- Allocations ----
 class AllocationIn(BaseModel):
@@ -79,8 +76,7 @@ class TagIn(BaseModel):
 
 class TagOut(TagIn):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ---- Journals ----
@@ -156,8 +152,7 @@ class EntryIn(BaseModel):
 
 class EntryOut(EntryIn):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ---- Comments ----
 class CommentIn(BaseModel):
@@ -168,5 +163,4 @@ class CommentIn(BaseModel):
 
 class CommentOut(CommentIn):
     id: int
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

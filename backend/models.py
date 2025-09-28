@@ -290,8 +290,6 @@ class JournalPosting(Base):
     item_project = relationship("Project")
     category = relationship("Category")
 
-
-class Comment(Base):
 class Comment(Base):
     __tablename__ = "comments"
     id = Column(Integer, primary_key=True)

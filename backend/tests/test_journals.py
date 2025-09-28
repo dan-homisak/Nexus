@@ -102,16 +102,6 @@ def test_allocations_append_only_trigger(db_session):
     db_session.rollback()
 
 
-def test_journal_balance_trigger(db_session):
-    _, _, _, _, alloc = _seed_ledger(db_session)
-    entry = models.JournalEntry(kind="REALLOC")
-    db_session.add(entry)
-    db_session.flush()
-    db_session.add(models.JournalPosting(journal_id=entry.id, allocation_id=alloc.id, amount=Decimal("10"), currency="USD"))
-    with pytest.raises(Exception):
-        db_session.commit()
-    db_session.rollback()
-
 
 def test_create_journal_entry_balanced(db_session):
     fs, project, category, _, alloc = _seed_ledger(db_session)

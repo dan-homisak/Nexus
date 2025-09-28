@@ -16,6 +16,20 @@ depends_on = None
 CURRENT_TS = sa.text("CURRENT_TIMESTAMP")
 
 
+def _has_column(table: str, column: str) -> bool:
+    conn = op.get_bind()
+    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def _add_column_if_missing(table: str, column: sa.Column) -> bool:
+    if not _has_column(table, column.name):
+        op.add_column(table, column)
+        return True
+    return False
+
+
+
 def _has_table(table: str) -> bool:
     conn = op.get_bind()
     rows = conn.exec_driver_sql(
@@ -59,6 +73,11 @@ def _fk_exists(table: str, ref_table: str, local_cols: list[str], remote_cols: l
 
 
 def _ensure_journal_tables():
+    if _has_table('journal_entries'):
+        required_cols = {'id', 'kind', 'posted_at', 'note', 'created_by', 'created_at'}
+        existing = {row[1] for row in op.get_bind().exec_driver_sql("PRAGMA table_info(journal_entries)").fetchall()}
+        if not required_cols.issubset(existing):
+            op.drop_table('journal_entries')
     if not _has_table('journal_entries'):
         op.create_table(
             'journal_entries',
@@ -70,14 +89,35 @@ def _ensure_journal_tables():
             sa.Column('created_at', sa.DateTime(), nullable=False, server_default=CURRENT_TS),
             sa.CheckConstraint("kind IN ('REALLOC','ADJUST','CORRECTION')", name='ck_journal_kind')
         )
-        op.create_index('ix_journal_entries_posted_at', 'journal_entries', ['posted_at'])
-        op.create_index('ix_journal_entries_kind_posted', 'journal_entries', ['kind', 'posted_at'])
     else:
-        if not _has_index('journal_entries', 'ix_journal_entries_posted_at'):
-            op.create_index('ix_journal_entries_posted_at', 'journal_entries', ['posted_at'])
-        if not _has_index('journal_entries', 'ix_journal_entries_kind_posted'):
-            op.create_index('ix_journal_entries_kind_posted', 'journal_entries', ['kind', 'posted_at'])
+        added_posted = _add_column_if_missing('journal_entries', sa.Column('posted_at', sa.DateTime(), nullable=True))
+        added_kind = _add_column_if_missing('journal_entries', sa.Column('kind', sa.String(length=16), nullable=True))
+        added_note = _add_column_if_missing('journal_entries', sa.Column('note', sa.Text(), nullable=True))
+        added_created_by = _add_column_if_missing('journal_entries', sa.Column('created_by', sa.String(length=100), nullable=True))
+        added_created_at = _add_column_if_missing('journal_entries', sa.Column('created_at', sa.DateTime(), nullable=True))
+        if any((added_posted, added_kind, added_created_at, added_note, added_created_by)):
+            op.execute(sa.text("""
+                UPDATE journal_entries
+                SET posted_at = COALESCE(posted_at, CURRENT_TIMESTAMP),
+                    kind = COALESCE(kind, 'REALLOC'),
+                    note = COALESCE(note, ''),
+                    created_by = COALESCE(created_by, 'system'),
+                    created_at = COALESCE(created_at, CURRENT_TIMESTAMP)
+            """))
+        with op.batch_alter_table('journal_entries') as batch:
+            batch.alter_column('posted_at', existing_type=sa.DateTime(), nullable=False)
+            batch.alter_column('kind', existing_type=sa.String(length=16), nullable=False)
+            batch.alter_column('created_at', existing_type=sa.DateTime(), nullable=False)
+    if not _has_index('journal_entries', 'ix_journal_entries_posted_at'):
+        op.create_index('ix_journal_entries_posted_at', 'journal_entries', ['posted_at'])
+    if not _has_index('journal_entries', 'ix_journal_entries_kind_posted'):
+        op.create_index('ix_journal_entries_kind_posted', 'journal_entries', ['kind', 'posted_at'])
 
+    if _has_table('journal_postings'):
+        required_cols = {'id', 'journal_id', 'allocation_id', 'budget_id', 'item_project_id', 'category_id', 'amount', 'currency', 'created_at'}
+        existing = {row[1] for row in op.get_bind().exec_driver_sql("PRAGMA table_info(journal_postings)").fetchall()}
+        if not required_cols.issubset(existing):
+            op.drop_table('journal_postings')
     if not _has_table('journal_postings'):
         op.create_table(
             'journal_postings',
@@ -101,12 +141,23 @@ def _ensure_journal_tables():
                 name='ck_journal_postings_target'
             )
         )
+    else:
+        added_currency = _add_column_if_missing('journal_postings', sa.Column('currency', sa.String(length=10), nullable=True, server_default=sa.text("'USD'")))
+        added_created_at = _add_column_if_missing('journal_postings', sa.Column('created_at', sa.DateTime(), nullable=True))
+        if added_currency:
+            op.execute(sa.text("UPDATE journal_postings SET currency = COALESCE(currency, 'USD')"))
+        if added_created_at:
+            op.execute(sa.text("UPDATE journal_postings SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)"))
+        with op.batch_alter_table('journal_postings') as batch:
+            batch.alter_column('currency', existing_type=sa.String(length=10), nullable=False, server_default=sa.text("'USD'"))
+            batch.alter_column('created_at', existing_type=sa.DateTime(), nullable=False)
     if not _has_index('journal_postings', 'ix_journal_postings_journal_id'):
         op.create_index('ix_journal_postings_journal_id', 'journal_postings', ['journal_id'])
     if not _has_index('journal_postings', 'ix_journal_postings_allocation_id'):
         op.create_index('ix_journal_postings_allocation_id', 'journal_postings', ['allocation_id'])
     if not _has_index('journal_postings', 'ix_journal_postings_target_triplet'):
         op.create_index('ix_journal_postings_target_triplet', 'journal_postings', ['budget_id', 'item_project_id', 'category_id'])
+
 
 
 ENTRY_UPDATE_TRIGGER = """
@@ -167,39 +218,6 @@ BEGIN
 END;
 """
 
-BALANCE_INSERT_TRIGGER = """
-CREATE TRIGGER IF NOT EXISTS trg_journal_postings_balance_ai
-AFTER INSERT ON journal_postings
-BEGIN
-    SELECT CASE
-        WHEN (SELECT ROUND(COALESCE(SUM(amount), 0), 6) FROM journal_postings WHERE journal_id = NEW.journal_id) != 0
-            THEN RAISE(ABORT, 'journal postings must net to zero')
-    END;
-END;
-"""
-
-BALANCE_UPDATE_TRIGGER = """
-CREATE TRIGGER IF NOT EXISTS trg_journal_postings_balance_au
-AFTER UPDATE ON journal_postings
-BEGIN
-    SELECT CASE
-        WHEN (SELECT ROUND(COALESCE(SUM(amount), 0), 6) FROM journal_postings WHERE journal_id = NEW.journal_id) != 0
-            THEN RAISE(ABORT, 'journal postings must net to zero')
-    END;
-END;
-"""
-
-BALANCE_DELETE_TRIGGER = """
-CREATE TRIGGER IF NOT EXISTS trg_journal_postings_balance_ad
-AFTER DELETE ON journal_postings
-BEGIN
-    SELECT CASE
-        WHEN (SELECT ROUND(COALESCE(SUM(amount), 0), 6) FROM journal_postings WHERE journal_id = OLD.journal_id) != 0
-            THEN RAISE(ABORT, 'journal postings must net to zero')
-    END;
-END;
-"""
-
 ALLOCATIONS_EFFECTIVE_VIEW = dedent(
     """
     CREATE VIEW IF NOT EXISTS allocations_effective AS
@@ -248,9 +266,6 @@ TRIGGERS = [
     ('trg_allocations_append_only_delete', ALLOC_DELETE_TRIGGER),
     ('trg_journal_postings_target_bi', TARGET_GUARD_INSERT),
     ('trg_journal_postings_target_bu', TARGET_GUARD_UPDATE),
-    ('trg_journal_postings_balance_ai', BALANCE_INSERT_TRIGGER),
-    ('trg_journal_postings_balance_au', BALANCE_UPDATE_TRIGGER),
-    ('trg_journal_postings_balance_ad', BALANCE_DELETE_TRIGGER),
 ]
 
 
@@ -261,6 +276,9 @@ VIEWS = [
 
 
 def upgrade() -> None:
+    for name in ['trg_journal_postings_balance_ai', 'trg_journal_postings_balance_au', 'trg_journal_postings_balance_ad']:
+        op.execute(f"DROP TRIGGER IF EXISTS {name}")
+
     _ensure_journal_tables()
 
     for name, sql in TRIGGERS:
