@@ -314,6 +314,12 @@ class Tag(Base):
         nullable=False,
     )
 
+    assignments = relationship(
+        "TagAssignment",
+        back_populates="tag",
+        cascade="all, delete-orphan",
+    )
+
 
 class EntryTag(Base):
     __tablename__ = "entry_tags"
@@ -321,3 +327,93 @@ class EntryTag(Base):
     entry_id = Column(Integer, ForeignKey("entries.id", ondelete="CASCADE"), nullable=False)
     tag_id = Column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
     __table_args__ = (UniqueConstraint("entry_id", "tag_id", name="uq_entry_tag"),)
+
+
+class TagAssignment(Base):
+    __tablename__ = "tag_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('budget','item_project','category','entry','line_asset','vendor')",
+            name="ck_tag_assignments_entity_type",
+        ),
+        UniqueConstraint(
+            "tag_id",
+            "entity_type",
+            "entity_id",
+            "scope",
+            name="uq_tag_assignments_scope",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tag_id = Column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    scope = Column(String(64), nullable=False, default="", server_default="")
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+    tag = relationship("Tag", back_populates="assignments")
+
+
+class EffectiveTagIndex(Base):
+    __tablename__ = "effective_tag_index"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_type",
+            "entity_id",
+            "tag_id",
+            "scope",
+            name="uq_effective_tag_index_unique",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    tag_id = Column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
+    scope = Column(String(64), nullable=False, default="", server_default="")
+    source = Column(String(64), nullable=False)
+    path_ids = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+
+
+class BackgroundJob(Base):
+    __tablename__ = "background_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','success','error')",
+            name="ck_background_jobs_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="queued", server_default="queued")
+    payload = Column(Text)
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    error = Column(Text)
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String(64), nullable=False)
+    actor = Column(String(128))
+    description = Column(Text)
+    payload = Column(Text)
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())

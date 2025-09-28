@@ -4,13 +4,14 @@ from decimal import Decimal
 import os, time, types
 from typing import List, Optional
 from fastapi import BackgroundTasks
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import Body, FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, and_, case
 from .db import Base, engine, get_db
 from . import models, schemas, models_finance  # noqa: F401 - ensure models are registered
+from .services import tags as tag_service
 from .routes_finance import router as finance_router
 from .csv_io import export_to_csv, import_latest_csv
 from .sql.views import ensure_views
@@ -328,21 +329,150 @@ def category_tree(db: Session = Depends(get_db)):
     return roots
 
 # --- Tags ---
-@app.get("/api/tags")
-def list_tags(db: Session = Depends(get_db)):
-    return db.execute(select(models.Tag)).scalars().all()
+# --- Tags ---
+@app.get("/api/tags", response_model=List[schemas.TagOut])
+def list_tags(
+    q: Optional[str] = Query(default=None, description="case-insensitive substring search"),
+    include_deprecated: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    stmt = select(models.Tag)
+    if q:
+        stmt = stmt.where(func.lower(models.Tag.name).like(f"%{q.lower()}%"))
+    if not include_deprecated:
+        stmt = stmt.where(models.Tag.is_deprecated.is_(False))
+    stmt = stmt.order_by(models.Tag.name.asc())
+    return db.execute(stmt).scalars().all()
 
-@app.post("/api/tags")
-def create_tag(tag: schemas.TagIn, db: Session = Depends(get_db)):
-    name = tag.name.strip()
-    if not name:
-        raise HTTPException(400, "Tag name required")
-    existing = db.execute(select(models.Tag).where(models.Tag.name == name)).scalar_one_or_none()
-    if existing:
-        return existing
-    m = models.Tag(name=name)
-    db.add(m); db.commit(); db.refresh(m)
-    return m
+
+@app.post("/api/tags", response_model=schemas.TagOut, status_code=201)
+def create_tag(payload: schemas.TagCreate, db: Session = Depends(get_db)):
+    try:
+        return tag_service.create_tag(
+            db,
+            name=payload.name,
+            color=payload.color,
+            description=payload.description,
+            actor=payload.actor,
+        )
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.patch("/api/tags/{tag_id}", response_model=schemas.TagOut)
+def update_tag_endpoint(tag_id: int, payload: schemas.TagUpdate, db: Session = Depends(get_db)):
+    tag = get_or_404(db, models.Tag, tag_id)
+    try:
+        return tag_service.update_tag(
+            db,
+            tag,
+            color=payload.color,
+            description=payload.description,
+            is_deprecated=payload.is_deprecated,
+            actor=payload.actor,
+        )
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.post("/api/tags/{tag_id}/rename", response_model=schemas.TagOut)
+def rename_tag_endpoint(tag_id: int, payload: schemas.TagRename, db: Session = Depends(get_db)):
+    tag = get_or_404(db, models.Tag, tag_id)
+    try:
+        return tag_service.rename_tag(db, tag, name=payload.name, actor=payload.actor)
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.post("/api/tags/{source_id}/merge-into/{target_id}", response_model=schemas.TagOut)
+def merge_tags_endpoint(
+    source_id: int,
+    target_id: int,
+    payload: schemas.TagMerge = Body(default=schemas.TagMerge()),
+    db: Session = Depends(get_db),
+):
+    source = get_or_404(db, models.Tag, source_id)
+    target = get_or_404(db, models.Tag, target_id)
+    try:
+        return tag_service.merge_tags(db, source=source, target=target, actor=payload.actor)
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.delete("/api/tags/{tag_id}")
+def delete_tag(tag_id: int, actor: Optional[str] = Query(default=None), db: Session = Depends(get_db)):
+    tag = get_or_404(db, models.Tag, tag_id)
+    try:
+        tag_service.delete_tag(db, tag, actor=actor)
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/tags/assign", response_model=schemas.TagAssignmentOut, status_code=201)
+def assign_tag(payload: schemas.TagAssignmentIn, db: Session = Depends(get_db)):
+    try:
+        assignment = tag_service.assign_tag(
+            db,
+            tag_id=payload.tag_id,
+            tag_name=payload.tag_name,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            scope=payload.scope,
+            actor=payload.actor,
+        )
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return assignment
+
+
+@app.delete("/api/tags/assign")
+def unassign_tag(payload: schemas.TagAssignmentIn = Body(...), db: Session = Depends(get_db)):
+    try:
+        tag_service.unassign_tag(
+            db,
+            tag_id=payload.tag_id,
+            tag_name=payload.tag_name,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            scope=payload.scope,
+            actor=payload.actor,
+        )
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"ok": True}
+
+
+@app.get(
+    "/api/effective-tags/{entity_type}/{entity_id}",
+    response_model=List[schemas.EffectiveTagOut],
+)
+def get_effective_tags(entity_type: str, entity_id: int, db: Session = Depends(get_db)):
+    rows = tag_service.list_effective_tags(db, entity_type=entity_type, entity_id=entity_id)
+    return [schemas.EffectiveTagOut(**row) for row in rows]
+
+
+@app.post(
+    "/api/admin/rebuild-effective-tags",
+    response_model=schemas.BackgroundJobOut,
+)
+def rebuild_effective_tags(
+    payload: schemas.RebuildRequest = Body(default=schemas.RebuildRequest()),
+    db: Session = Depends(get_db),
+):
+    job = tag_service.rebuild_effective_tags(db, actor=payload.actor)
+    return job
+
+
+@app.get(
+    "/api/admin/jobs/{job_id}",
+    response_model=schemas.BackgroundJobOut,
+)
+def get_job(job_id: int, db: Session = Depends(get_db)):
+    job = tag_service.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 # --- Entries + Allocations + Comments ---
 @app.get("/api/entries")
@@ -376,11 +506,29 @@ def create_entry(e: schemas.EntryIn, db: Session = Depends(get_db)):
             tname = (t or "").strip()
             if not tname:
                 continue
-            tag = db.execute(select(models.Tag).where(models.Tag.name == tname)).scalar_one_or_none()
-            if not tag:
-                tag = models.Tag(name=tname)
-                db.add(tag); db.flush()
-            db.add(models.EntryTag(entry_id=m.id, tag_id=tag.id))
+            try:
+                assignment = tag_service.assign_tag(
+                    db,
+                    tag_id=None,
+                    tag_name=tname,
+                    entity_type="entry",
+                    entity_id=m.id,
+                    scope=None,
+                    actor=None,
+                    commit=False,
+                )
+            except tag_service.TagServiceError as exc:
+                raise HTTPException(status_code=422, detail=f"tag error: {exc}") from exc
+
+            exists_entry_tag = db.execute(
+                select(models.EntryTag)
+                .where(
+                    models.EntryTag.entry_id == m.id,
+                    models.EntryTag.tag_id == assignment.tag_id,
+                )
+            ).scalar_one_or_none()
+            if not exists_entry_tag:
+                db.add(models.EntryTag(entry_id=m.id, tag_id=assignment.tag_id))
 
     db.commit(); db.refresh(m)
     return m

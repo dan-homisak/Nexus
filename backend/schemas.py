@@ -70,13 +70,88 @@ class AllocationIn(BaseModel):
     amount: float
 
 # ---- Tags ----
-class TagIn(BaseModel):
+class TagCreate(BaseModel):
     name: str
+    color: Optional[str] = None
+    description: Optional[str] = None
+    actor: Optional[str] = None
 
 
-class TagOut(TagIn):
+class TagUpdate(BaseModel):
+    color: Optional[str] = None
+    description: Optional[str] = None
+    is_deprecated: Optional[bool] = None
+    actor: Optional[str] = None
+
+
+class TagRename(BaseModel):
+    name: str
+    actor: Optional[str] = None
+
+
+class TagMerge(BaseModel):
+    actor: Optional[str] = None
+
+
+class TagOut(BaseModel):
     id: int
+    name: str
+    color: Optional[str] = None
+    description: Optional[str] = None
+    is_deprecated: bool
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class TagAssignmentIn(BaseModel):
+    tag_id: Optional[int] = None
+    tag_name: Optional[str] = None
+    entity_type: str
+    entity_id: int
+    scope: Optional[str] = None
+    actor: Optional[str] = None
+
+
+class TagAssignmentOut(BaseModel):
+    id: int
+    tag_id: int
+    entity_type: str
+    entity_id: int
+    scope: Optional[str] = None
+    created_at: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EffectiveTagOut(BaseModel):
+    id: int
+    entity_type: str
+    entity_id: int
+    tag_id: int
+    tag_name: str
+    tag_color: Optional[str] = None
+    scope: Optional[str] = None
+    source: str
+    path_ids: Optional[str] = None
+    created_at: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BackgroundJobOut(BaseModel):
+    id: int
+    kind: str
+    status: str
+    payload: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    error: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RebuildRequest(BaseModel):
+    actor: Optional[str] = None
 
 
 # ---- Journals ----
