@@ -48,6 +48,10 @@ def _dt(value):
     return value.isoformat() if value else None
 
 
+def _date(value):
+    return value.isoformat() if value else None
+
+
 def _arr(value: Optional[Union[str, List]]) -> Optional[List]:
     if value is None:
         return None
@@ -91,7 +95,7 @@ def _budget_to_schema(data: dict) -> schemas.BudgetOut:
         name=data["name"],
         owner=data.get("owner"),
         is_cost_center=data["is_cost_center"],
-        closure_date=data.get("closure_date"),
+        closure_date=_date(data.get("closure_date")),
         description=data.get("description"),
         budget_amount_cache=data.get("budget_amount_cache"),
         created_at=_dt(data.get("created_at")),

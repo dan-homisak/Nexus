@@ -2663,9 +2663,9 @@
           async function refreshCurrentBudget() {
             closeInspector();
             fundingState.lineAssetCache.clear();
-            await loadBudgetTree(fundingState.selectedBudgetId);
             await loadBudgets(fundingState.searchTerm);
             renderBudgetList();
+            await loadBudgetTree(fundingState.selectedBudgetId);
           }
 
           fundingState.refreshCurrentBudget = refreshCurrentBudget;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date as DateType
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -215,7 +216,13 @@ def update_budget(
     if owner is not None:
         budget.owner = owner
     if closure_date is not None:
-        budget.closure_date = closure_date
+        if closure_date == "" or closure_date is None:
+            budget.closure_date = None
+        else:
+            try:
+                budget.closure_date = DateType.fromisoformat(closure_date)
+            except ValueError as exc:
+                raise FundingServiceError("invalid closure_date format", code="invalid_closure_date") from exc
     if description is not None:
         budget.description = description
 
