@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import date as DateType
+from datetime import datetime
 from decimal import Decimal
 import os, time, types
 from typing import List, Optional
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func, and_, case
 from .db import Base, engine, get_db
 from . import models, schemas, models_finance  # noqa: F401 - ensure models are registered
+from .routes_funding import router as funding_router
 from .services import tags as tag_service
 from .routes_finance import router as finance_router
 from .csv_io import export_to_csv, import_latest_csv
@@ -23,6 +25,7 @@ app.add_middleware(
 )
 
 app.include_router(finance_router)
+app.include_router(funding_router)
 
 def _shutdown():
     # slight delay so the HTTP response returns cleanly
@@ -50,6 +53,47 @@ JOURNAL_KINDS = {"REALLOC", "ADJUST", "CORRECTION"}
 ZERO_TOLERANCE = Decimal('0.000001')
 
 
+def _dt(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _tag_to_schema(tag: models.Tag) -> schemas.TagOut:
+    return schemas.TagOut(
+        id=tag.id,
+        name=tag.name,
+        color=tag.color,
+        description=tag.description,
+        is_deprecated=tag.is_deprecated,
+        created_at=_dt(getattr(tag, "created_at", None)),
+        updated_at=_dt(getattr(tag, "updated_at", None)),
+    )
+
+
+def _assignment_to_schema(assignment: models.TagAssignment) -> schemas.TagAssignmentOut:
+    return schemas.TagAssignmentOut(
+        id=assignment.id,
+        tag_id=assignment.tag_id,
+        entity_type=assignment.entity_type,
+        entity_id=assignment.entity_id,
+        scope=assignment.scope or None,
+        created_at=_dt(getattr(assignment, "created_at", None)),
+    )
+
+
+def _job_to_schema(job: models.BackgroundJob) -> schemas.BackgroundJobOut:
+    return schemas.BackgroundJobOut(
+        id=job.id,
+        kind=job.kind,
+        status=job.status,
+        payload=job.payload,
+        started_at=_dt(job.started_at),
+        finished_at=_dt(job.finished_at),
+        error=job.error,
+        created_at=_dt(job.created_at),
+        updated_at=_dt(job.updated_at),
+    )
+
+
 def _serialize_journal(entry: models.JournalEntry) -> schemas.JournalEntryOut:
     postings = [
         schemas.JournalPostingOut(
@@ -61,17 +105,17 @@ def _serialize_journal(entry: models.JournalEntry) -> schemas.JournalEntryOut:
             category_id=p.category_id,
             amount=float(p.amount),
             currency=p.currency,
-            created_at=p.created_at.isoformat() if p.created_at else None,
+            created_at=_dt(p.created_at),
         )
         for p in entry.postings
     ]
     return schemas.JournalEntryOut(
         id=entry.id,
         kind=entry.kind,
-        posted_at=entry.posted_at.isoformat() if entry.posted_at else None,
+        posted_at=_dt(entry.posted_at),
         note=entry.note,
         created_by=entry.created_by,
-        created_at=entry.created_at.isoformat() if entry.created_at else None,
+        created_at=_dt(entry.created_at),
         net_amount=float(entry.net_amount),
         balanced=entry.balanced,
         postings=postings,
@@ -198,17 +242,6 @@ def delete_portfolio(portfolio_id: int, db: Session = Depends(get_db)):
     db.delete(m); db.commit()
     return {"ok": True}
 
-# --- Project Groups ---
-@app.get("/api/project-groups")
-def list_pgs(db: Session = Depends(get_db)):
-    return db.execute(select(models.ProjectGroup)).scalars().all()
-
-@app.post("/api/project-groups")
-def create_pg(pg: schemas.ProjectGroupIn, db: Session = Depends(get_db)):
-    m = models.ProjectGroup(**pg.model_dump())
-    db.add(m); db.commit(); db.refresh(m)
-    return m
-
 # --- Projects ---
 @app.get("/api/projects")
 def list_projects(db: Session = Depends(get_db)):
@@ -274,66 +307,12 @@ def delete_vendor(vid: int, db: Session = Depends(get_db)):
     db.delete(m); db.commit()
     return {"ok": True}
 
-# --- Categories (n-level) ---
-@app.get("/api/categories")
-def list_categories(db: Session = Depends(get_db)):
-    return db.execute(select(models.Category)).scalars().all()
-
-@app.post("/api/categories")
-def create_category(c: schemas.CategoryIn, db: Session = Depends(get_db)):
-    data = c.model_dump()
-    item_project_id = data.get("item_project_id") or data.get("project_id")
-    if not item_project_id:
-        raise HTTPException(400, "item_project_id or project_id is required")
-    project = get_or_404(db, models.Project, item_project_id)
-    data["item_project_id"] = item_project_id
-    data["budget_id"] = data.get("budget_id") or project.budget_id
-    if data.get("amount_leaf") is not None:
-        data["amount_leaf"] = float(data["amount_leaf"])
-    m = models.Category(**data)
-    db.add(m); db.commit(); db.refresh(m)
-    return m
-
-@app.put("/api/categories/{cid}")
-def update_category(cid: int, c: schemas.CategoryIn, db: Session = Depends(get_db)):
-    m = get_or_404(db, models.Category, cid)
-    data = c.model_dump()
-    item_project_id = data.get("item_project_id") or data.get("project_id") or m.item_project_id
-    project = get_or_404(db, models.Project, item_project_id)
-    data["item_project_id"] = item_project_id
-    data["budget_id"] = data.get("budget_id") or project.budget_id
-    if data.get("amount_leaf") is not None:
-        data["amount_leaf"] = float(data["amount_leaf"])
-    for k, v in data.items():
-        setattr(m, k, v)
-    db.commit(); db.refresh(m)
-    return m
-
-@app.delete("/api/categories/{cid}")
-def delete_category(cid: int, db: Session = Depends(get_db)):
-    m = get_or_404(db, models.Category, cid)
-    db.delete(m); db.commit()
-    return {"ok": True}
-
-@app.get("/api/categories/tree")
-def category_tree(db: Session = Depends(get_db)):
-    rows = db.execute(select(models.Category)).scalars().all()
-    by_id = {c.id: {"id": c.id, "name": c.name, "parent_id": c.parent_id, "project_id": c.project_id, "children": []} for c in rows}
-    roots = []
-    for c in rows:
-        node = by_id[c.id]
-        if c.parent_id and c.parent_id in by_id:
-            by_id[c.parent_id]["children"].append(node)
-        else:
-            roots.append(node)
-    return roots
-
 # --- Tags ---
 # --- Tags ---
 @app.get("/api/tags", response_model=List[schemas.TagOut])
 def list_tags(
     q: Optional[str] = Query(default=None, description="case-insensitive substring search"),
-    include_deprecated: bool = Query(default=False),
+    include_deprecated: bool = Query(default=False, alias="includeDeprecated"),
     db: Session = Depends(get_db),
 ):
     stmt = select(models.Tag)
@@ -342,13 +321,14 @@ def list_tags(
     if not include_deprecated:
         stmt = stmt.where(models.Tag.is_deprecated.is_(False))
     stmt = stmt.order_by(models.Tag.name.asc())
-    return db.execute(stmt).scalars().all()
+    tags = db.execute(stmt).scalars().all()
+    return [_tag_to_schema(tag) for tag in tags]
 
 
 @app.post("/api/tags", response_model=schemas.TagOut, status_code=201)
 def create_tag(payload: schemas.TagCreate, db: Session = Depends(get_db)):
     try:
-        return tag_service.create_tag(
+        created = tag_service.create_tag(
             db,
             name=payload.name,
             color=payload.color,
@@ -357,13 +337,14 @@ def create_tag(payload: schemas.TagCreate, db: Session = Depends(get_db)):
         )
     except tag_service.TagServiceError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    return _tag_to_schema(created)
 
 
 @app.patch("/api/tags/{tag_id}", response_model=schemas.TagOut)
 def update_tag_endpoint(tag_id: int, payload: schemas.TagUpdate, db: Session = Depends(get_db)):
     tag = get_or_404(db, models.Tag, tag_id)
     try:
-        return tag_service.update_tag(
+        updated = tag_service.update_tag(
             db,
             tag,
             color=payload.color,
@@ -373,15 +354,17 @@ def update_tag_endpoint(tag_id: int, payload: schemas.TagUpdate, db: Session = D
         )
     except tag_service.TagServiceError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    return _tag_to_schema(updated)
 
 
 @app.post("/api/tags/{tag_id}/rename", response_model=schemas.TagOut)
 def rename_tag_endpoint(tag_id: int, payload: schemas.TagRename, db: Session = Depends(get_db)):
     tag = get_or_404(db, models.Tag, tag_id)
     try:
-        return tag_service.rename_tag(db, tag, name=payload.name, actor=payload.actor)
+        renamed = tag_service.rename_tag(db, tag, name=payload.name, actor=payload.actor)
     except tag_service.TagServiceError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    return _tag_to_schema(renamed)
 
 
 @app.post("/api/tags/{source_id}/merge-into/{target_id}", response_model=schemas.TagOut)
@@ -394,19 +377,10 @@ def merge_tags_endpoint(
     source = get_or_404(db, models.Tag, source_id)
     target = get_or_404(db, models.Tag, target_id)
     try:
-        return tag_service.merge_tags(db, source=source, target=target, actor=payload.actor)
+        merged = tag_service.merge_tags(db, source=source, target=target, actor=payload.actor)
     except tag_service.TagServiceError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-
-
-@app.delete("/api/tags/{tag_id}")
-def delete_tag(tag_id: int, actor: Optional[str] = Query(default=None), db: Session = Depends(get_db)):
-    tag = get_or_404(db, models.Tag, tag_id)
-    try:
-        tag_service.delete_tag(db, tag, actor=actor)
-    except tag_service.TagServiceError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    return {"ok": True}
+    return _tag_to_schema(merged)
 
 
 @app.post("/api/tags/assign", response_model=schemas.TagAssignmentOut, status_code=201)
@@ -423,7 +397,7 @@ def assign_tag(payload: schemas.TagAssignmentIn, db: Session = Depends(get_db)):
         )
     except tag_service.TagServiceError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    return assignment
+    return _assignment_to_schema(assignment)
 
 
 @app.delete("/api/tags/assign")
@@ -443,6 +417,16 @@ def unassign_tag(payload: schemas.TagAssignmentIn = Body(...), db: Session = Dep
     return {"ok": True}
 
 
+@app.delete("/api/tags/{tag_id}")
+def delete_tag(tag_id: int, actor: Optional[str] = Query(default=None), db: Session = Depends(get_db)):
+    tag = get_or_404(db, models.Tag, tag_id)
+    try:
+        tag_service.delete_tag(db, tag, actor=actor)
+    except tag_service.TagServiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True}
+
+
 @app.get(
     "/api/effective-tags/{entity_type}/{entity_id}",
     response_model=List[schemas.EffectiveTagOut],
@@ -452,18 +436,7 @@ def get_effective_tags(entity_type: str, entity_id: int, db: Session = Depends(g
     return [schemas.EffectiveTagOut(**row) for row in rows]
 
 
-@app.post(
-    "/api/admin/rebuild-effective-tags",
-    response_model=schemas.BackgroundJobOut,
-)
-def rebuild_effective_tags(
-    payload: schemas.RebuildRequest = Body(default=schemas.RebuildRequest()),
-    db: Session = Depends(get_db),
-):
-    job = tag_service.rebuild_effective_tags(db, actor=payload.actor)
-    return job
-
-
+# Legacy job lookup retained for compatibility
 @app.get(
     "/api/admin/jobs/{job_id}",
     response_model=schemas.BackgroundJobOut,
@@ -472,7 +445,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
     job = tag_service.get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    return job
+    return _job_to_schema(job)
 
 # --- Entries + Allocations + Comments ---
 @app.get("/api/entries")
@@ -556,28 +529,6 @@ def create_comment(c: schemas.CommentIn, db: Session = Depends(get_db)):
     m = models.Comment(**c.model_dump())
     db.add(m); db.commit(); db.refresh(m)
     return m
-
-@app.put("/api/project-groups/{pg_id}", response_model=schemas.ProjectGroupOut)
-def update_project_group(pg_id: int, data: schemas.ProjectGroupIn, db: Session = Depends(get_db)):
-    pg = db.get(models.ProjectGroup, pg_id)
-    if not pg:
-        raise HTTPException(status_code=404, detail="Not found")
-    # update fields (treat empty strings as None where useful)
-    pg.code = (data.code or None)
-    pg.name = data.name
-    pg.description = (data.description or None)
-    db.commit()
-    db.refresh(pg)
-    return pg
-
-@app.delete("/api/project-groups/{pg_id}")
-def delete_project_group(pg_id: int, db: Session = Depends(get_db)):
-    pg = db.get(models.ProjectGroup, pg_id)
-    if not pg:
-        return {"ok": True}
-    db.delete(pg)
-    db.commit()
-    return {"ok": True}
 
 # --- Pivots: generic summary (unchanged) ---
 @app.post("/api/journals", response_model=schemas.JournalEntryOut)

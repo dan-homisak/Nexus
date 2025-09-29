@@ -73,7 +73,7 @@ def _seed_hierarchy(session):
 
 
 def _names(rows: Iterable[dict]) -> set[tuple[str, str]]:
-    return {(row["tag_name"], row["source"]) for row in rows}
+    return {(row["name"], row["source"]) for row in rows}
 
 
 def test_tag_crud_and_assignments(db_session):
@@ -229,8 +229,8 @@ def test_effective_tag_rebuild(db_session):
     assert _names(project_rows) == {("item", "direct"), ("budget", "inherit:budget")}
 
     leaf_rows = list(tag_service.list_effective_tags(db_session, entity_type="category", entity_id=cat_leaf.id))
-    assert {row["tag_name"] for row in leaf_rows} == {"leaf", "parenttag", "item", "budget"}
-    sources = {row["tag_name"]: row["source"] for row in leaf_rows}
+    assert {row["name"] for row in leaf_rows} == {"leaf", "parenttag", "item", "budget"}
+    sources = {row["name"]: row["source"] for row in leaf_rows}
     assert sources["leaf"] == "direct"
     assert sources["parenttag"] == "inherit:category"
     assert sources["item"] == "inherit:item_project"
@@ -240,14 +240,14 @@ def test_effective_tag_rebuild(db_session):
     assert _names(parent_rows) == {("parenttag", "direct"), ("item", "inherit:item_project"), ("budget", "inherit:budget")}
 
     line_rows = list(tag_service.list_effective_tags(db_session, entity_type="line_asset", entity_id=line_asset.id))
-    assert {row["tag_name"] for row in line_rows} == {"line", "item", "budget"}
-    src_map = {row["tag_name"]: row["source"] for row in line_rows}
+    assert {row["name"] for row in line_rows} == {"line", "item", "budget"}
+    src_map = {row["name"]: row["source"] for row in line_rows}
     assert src_map["line"] == "direct"
     assert src_map["item"] == "inherit:item_project"
     assert src_map["budget"] == "inherit:budget"
 
     # Ensure path_ids recorded for category inheritance
-    cat_inherit = next(row for row in leaf_rows if row["tag_name"] == "parenttag")
+    cat_inherit = next(row for row in leaf_rows if row["name"] == "parenttag")
     assert cat_inherit["path_ids"] == f"[{cat_parent.id}]"
 
 
@@ -272,3 +272,58 @@ def test_background_job_and_audit(db_session):
     events = db_session.execute(select(models.AuditEvent).order_by(models.AuditEvent.id)).scalars().all()
     event_types = [e.event_type for e in events]
     assert "job.start" in event_types and "job.finish" in event_types
+
+
+def test_tag_usage_and_scoped_rebuild(db_session):
+    budget, project, cat_parent, cat_leaf, _ = _seed_hierarchy(db_session)
+
+    base_tag = tag_service.create_tag(db_session, name="base", color=None, description=None, actor="tester")
+    extra_tag = tag_service.create_tag(db_session, name="extra", color=None, description=None, actor="tester")
+
+    tag_service.assign_tag(
+        db_session,
+        tag_id=base_tag.id,
+        tag_name=None,
+        entity_type="budget",
+        entity_id=budget.id,
+        scope=None,
+        actor="tester",
+    )
+    tag_service.assign_tag(
+        db_session,
+        tag_id=extra_tag.id,
+        tag_name=None,
+        entity_type="category",
+        entity_id=cat_parent.id,
+        scope=None,
+        actor="tester",
+    )
+
+    tag_service.rebuild_effective_tags(db_session, actor="tester")
+
+    usage = tag_service.get_usage(db_session)
+    usage_map = {item["tag"]["name"]: item["assignments"] for item in usage}
+    assert usage_map["base"]["budget"] == 1
+    assert usage_map["extra"]["category"] == 1
+
+    new_tag = tag_service.create_tag(db_session, name="scoped", color=None, description=None, actor="tester")
+    tag_service.assign_tag(
+        db_session,
+        tag_id=new_tag.id,
+        tag_name=None,
+        entity_type="category",
+        entity_id=cat_leaf.id,
+        scope=None,
+        actor="tester",
+    )
+
+    # Scoped rebuild should only touch the leaf category subtree
+    job = tag_service.rebuild_effective_tags(db_session, actor="tester", only_for=f"category:{cat_leaf.id}")
+    assert job.status == "success"
+    assert job.payload and "category" in job.payload
+
+    leaf_rows = list(tag_service.list_effective_tags(db_session, entity_type="category", entity_id=cat_leaf.id))
+    assert any(row["name"] == "scoped" for row in leaf_rows)
+
+    parent_rows = list(tag_service.list_effective_tags(db_session, entity_type="category", entity_id=cat_parent.id))
+    assert all(row["name"] != "scoped" for row in parent_rows)

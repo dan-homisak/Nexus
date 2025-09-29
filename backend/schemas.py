@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import BaseModel, ConfigDict
 
 # ---- Portfolios ----
@@ -13,16 +13,6 @@ class PortfolioIn(BaseModel):
     is_temporary: Optional[bool] = False
 
 class PortfolioOut(PortfolioIn):
-    id: int
-    model_config = ConfigDict(from_attributes=True)
-
-# ---- Project Groups ----
-class ProjectGroupIn(BaseModel):
-    code: Optional[str] = None
-    name: str
-    description: Optional[str] = None
-
-class ProjectGroupOut(ProjectGroupIn):
     id: int
     model_config = ConfigDict(from_attributes=True)
 
@@ -152,6 +142,180 @@ class BackgroundJobOut(BaseModel):
 
 class RebuildRequest(BaseModel):
     actor: Optional[str] = None
+
+
+class TagRef(BaseModel):
+    id: int
+    name: str
+    color: Optional[str] = None
+
+
+class TagBundleOut(BaseModel):
+    direct: List[TagRef]
+    inherited: List[TagRef]
+    effective: List[TagRef]
+
+
+class TagUsageOut(BaseModel):
+    tag: TagOut
+    assignments: Dict[str, int]
+
+
+class BudgetStatsOut(BaseModel):
+    category_count: int
+    leaf_count: int
+    entry_count: int
+    allocation_count: int
+
+
+class BudgetOut(BaseModel):
+    id: int
+    name: str
+    owner: Optional[str] = None
+    is_cost_center: bool
+    closure_date: Optional[str] = None
+    description: Optional[str] = None
+    budget_amount_cache: Optional[float] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    stats: Optional[BudgetStatsOut] = None
+    tags: Optional[TagBundleOut] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BudgetCreate(BaseModel):
+    name: str
+    owner: Optional[str] = None
+    is_cost_center: bool = False
+    closure_date: Optional[str] = None
+    description: Optional[str] = None
+
+
+class BudgetUpdate(BaseModel):
+    name: Optional[str] = None
+    owner: Optional[str] = None
+    is_cost_center: Optional[bool] = None
+    closure_date: Optional[str] = None
+    description: Optional[str] = None
+
+
+class LineAssetSummary(BaseModel):
+    id: int
+    name: str
+
+
+class AssetListOut(BaseModel):
+    count: int
+    items: List[LineAssetSummary]
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ItemProjectOut(BaseModel):
+    id: int
+    name: str
+    budget_id: int
+    description: Optional[str] = None
+    legacy_portfolio_id: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    rollup_amount: float
+    tags: Optional[TagBundleOut] = None
+    assets: Optional[AssetListOut] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ItemProjectCreate(BaseModel):
+    budget_id: int
+    name: str
+    description: Optional[str] = None
+
+
+class ItemProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class CategoryOut(BaseModel):
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+    project_id: Optional[int] = None
+    budget_id: int
+    is_leaf: bool
+    amount_leaf: Optional[float] = None
+    rollup_amount: Optional[float] = None
+    path_depth: Optional[int] = None
+    path_ids: Optional[List[int]] = None
+    path_names: Optional[List[str]] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    tags: Optional[TagBundleOut] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CategoryCreate(BaseModel):
+    name: str
+    project_id: int
+    budget_id: int
+    parent_id: Optional[int] = None
+    is_leaf: bool = True
+    amount_leaf: Optional[float] = None
+    description: Optional[str] = None
+
+
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    parent_id: Optional[int] = None
+    project_id: Optional[int] = None
+    budget_id: Optional[int] = None
+    is_leaf: Optional[bool] = None
+    amount_leaf: Optional[float] = None
+
+
+class CategoryMoveCheckResponse(BaseModel):
+    can_move: bool
+    reason: Optional[str] = None
+    count: int
+
+
+class LineAssetOut(BaseModel):
+    id: int
+    name: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LineAssetCreate(BaseModel):
+    name: str
+
+
+class LineAssetUpdate(BaseModel):
+    name: str
+
+
+class ItemProjectAssetLink(BaseModel):
+    line_asset_id: int
+
+
+class FundingTreeNode(BaseModel):
+    id: int
+    type: str
+    name: str
+    depth: int
+    is_leaf: bool
+    amount_leaf: Optional[float] = None
+    rollup_amount: Optional[float] = None
+    project_id: Optional[int] = None
+    budget_id: Optional[int] = None
+    path_ids: Optional[List[int]] = None
+    path_names: Optional[List[str]] = None
+    tags: Optional[TagBundleOut] = None
+    assets: Optional[AssetListOut] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ---- Journals ----

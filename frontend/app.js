@@ -707,7 +707,6 @@
           return path.join(' > ');
         };
         const formatPortfolioLabel = (p) => `${p.name}${p.fiscal_year ? ' • FY ' + p.fiscal_year : ''}`;
-        const formatProjectGroupLabel = (pg) => `${pg.code ? pg.code + ' – ' : ''}${pg.name}`;
         const formatProjectLabel = (project, portfolioLookup) => {
           const fs = portfolioLookup && portfolioLookup[project.portfolio_id];
           const fsLabel = fs ? formatPortfolioLabel(fs) : `Funding Source ${project.portfolio_id}`;
@@ -717,6 +716,781 @@
         let reallocateDrawer = null;
         let reallocateCurrent = null;
         let reallocateSubmit = null;
+
+        const fundingState = {
+            budgets: [],
+            filteredBudgets: [],
+            selectedBudgetId: null,
+            budgetMap: new Map(),
+            budgetTree: [],
+            expanded: new Set(),
+            bannerEl: null,
+            bannerTimer: null,
+            jobPollers: new Map(),
+            tagCache: new Map(),
+            usageCache: null,
+            inspector: { open: false, entity: null },
+            lineAssetCache: new Map(),
+            projectNodeMap: new Map(),
+            categoryNodeMap: new Map(),
+          };
+
+        const TAG_SCOPE_TYPES = {
+          budget: 'Budget',
+          item_project: 'Item / Project',
+          category: 'Category',
+          line_asset: 'Line Asset',
+          entry: 'Entry',
+        };
+
+        const TAG_COLORS = [
+          '#5c6bf1', '#49a078', '#f1a45c', '#f16a6a', '#7f7aea', '#5cc1f1', '#a05cf1', '#f15ccc', '#8dd06c', '#f1c65c',
+        ];
+
+        const randomTagColor = () => TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)];
+
+        function openFormModal({ title, fields, submitLabel = 'Save', onSubmit, width }) {
+          const overlay = document.createElement('div');
+          overlay.className = 'modal-overlay';
+          const panel = document.createElement('div');
+          panel.className = 'modal';
+          if (width) panel.style.width = width;
+          const form = document.createElement('form');
+          form.className = 'modal-form';
+          const header = document.createElement('h3');
+          header.textContent = title || 'Details';
+          const body = document.createElement('div');
+          body.className = 'modal-body';
+          const errorBox = document.createElement('div');
+          errorBox.className = 'modal-error hidden';
+          const actions = document.createElement('div');
+          actions.className = 'modal-actions';
+          const submitBtn = document.createElement('button');
+          submitBtn.type = 'submit';
+          submitBtn.textContent = submitLabel;
+          submitBtn.className = 'modal-submit';
+          const cancelBtn = document.createElement('button');
+          cancelBtn.type = 'button';
+          cancelBtn.textContent = 'Cancel';
+          cancelBtn.className = 'modal-cancel';
+          actions.append(cancelBtn, submitBtn);
+
+          const fieldRefs = new Map();
+          (fields || []).forEach(field => {
+            const wrapper = document.createElement('label');
+            wrapper.className = 'modal-field';
+            wrapper.dataset.field = field.name;
+            const title = document.createElement('span');
+            title.textContent = field.label || field.name;
+            const required = !!field.required;
+            if (required) {
+              const star = document.createElement('span');
+              star.textContent = '*';
+              star.className = 'modal-required';
+              title.append(star);
+            }
+            wrapper.appendChild(title);
+            let input;
+            const type = field.type || 'text';
+            if (type === 'textarea') {
+              input = document.createElement('textarea');
+              input.rows = field.rows || 3;
+              input.value = field.value ?? '';
+            } else if (type === 'checkbox') {
+              input = document.createElement('input');
+              input.type = 'checkbox';
+              input.checked = !!field.value;
+              wrapper.classList.add('modal-field-checkbox');
+            } else if (type === 'select') {
+              input = document.createElement('select');
+              (field.options || []).forEach(opt => {
+                const optionEl = document.createElement('option');
+                if (typeof opt === 'string') {
+                  optionEl.value = opt;
+                  optionEl.textContent = opt;
+                } else {
+                  optionEl.value = opt.value;
+                  optionEl.textContent = opt.label;
+                }
+                input.appendChild(optionEl);
+              });
+              if (field.value !== undefined && field.value !== null) input.value = field.value;
+            } else {
+              input = document.createElement('input');
+              input.type = type;
+              input.value = field.value ?? '';
+            }
+            if (field.placeholder) input.placeholder = field.placeholder;
+            if (field.maxLength) input.maxLength = field.maxLength;
+            if (field.disabled) input.disabled = true;
+            input.name = field.name;
+            wrapper.appendChild(input);
+            if (field.hint) {
+              const hint = document.createElement('small');
+              hint.className = 'modal-hint';
+              hint.textContent = field.hint;
+              wrapper.appendChild(hint);
+            }
+            body.appendChild(wrapper);
+            fieldRefs.set(field.name, { config: field, element: input });
+          });
+
+          const close = () => {
+            document.removeEventListener('keydown', handleKeydown);
+            overlay.remove();
+          };
+
+          const setError = (message) => {
+            if (!message) {
+              errorBox.classList.add('hidden');
+              errorBox.textContent = '';
+            } else {
+              errorBox.textContent = message;
+              errorBox.classList.remove('hidden');
+            }
+          };
+
+          const setBusy = (busy) => {
+            submitBtn.disabled = !!busy;
+            form.classList.toggle('modal-busy', !!busy);
+          };
+
+          const handleKeydown = (evt) => {
+            if (evt.key === 'Escape') {
+              evt.preventDefault();
+              close();
+            }
+          };
+
+          form.addEventListener('submit', async (evt) => {
+            evt.preventDefault();
+            if (!onSubmit) {
+              close();
+              return;
+            }
+            const data = {};
+            for (const [name, ref] of fieldRefs.entries()) {
+              const { config, element } = ref;
+              let value;
+              if (config.type === 'checkbox') {
+                value = !!element.checked;
+              } else if (config.type === 'number') {
+                value = element.value === '' ? null : Number(element.value);
+              } else {
+                value = element.value;
+                if (config.trim !== false && typeof value === 'string') value = value.trim();
+              }
+              if (config.required && (value === '' || value === null || value === undefined)) {
+                setError(`${config.label || config.name} is required.`);
+                element.focus();
+                return;
+              }
+              data[name] = value;
+            }
+            setError('');
+            try {
+              setBusy(true);
+              await onSubmit(data, { close, setError, setBusy });
+            } catch (err) {
+              console.error(err);
+              setError(err?.message || String(err));
+            } finally {
+              setBusy(false);
+            }
+          });
+
+          cancelBtn.addEventListener('click', () => close());
+          overlay.addEventListener('click', (evt) => {
+            if (evt.target === overlay) close();
+          });
+          document.addEventListener('keydown', handleKeydown);
+
+          form.append(header, errorBox, body, actions);
+          panel.appendChild(form);
+          overlay.appendChild(panel);
+          document.body.appendChild(overlay);
+
+          const firstInput = body.querySelector('input, textarea, select');
+          if (firstInput && typeof firstInput.focus === 'function') {
+            setTimeout(() => firstInput.focus(), 60);
+          }
+
+          return { close, setError, setBusy };
+        }
+
+        function ensureBanner() {
+          if (fundingState.bannerEl) return fundingState.bannerEl;
+          const banner = document.createElement('div');
+          banner.id = 'jobBanner';
+          banner.className = 'banner hidden';
+          document.body.appendChild(banner);
+          fundingState.bannerEl = banner;
+          return banner;
+        }
+
+        function showBanner(message, tone = 'info') {
+          const banner = ensureBanner();
+          banner.textContent = message;
+          banner.className = `banner banner-${tone}`;
+          banner.classList.remove('hidden');
+          if (fundingState.bannerTimer) {
+            clearTimeout(fundingState.bannerTimer);
+            fundingState.bannerTimer = null;
+          }
+        }
+
+        function hideBanner(delay = 0) {
+          const banner = ensureBanner();
+          if (delay) {
+            if (fundingState.bannerTimer) clearTimeout(fundingState.bannerTimer);
+            fundingState.bannerTimer = setTimeout(() => {
+              banner.classList.add('hidden');
+              fundingState.bannerTimer = null;
+            }, delay);
+          } else {
+            banner.classList.add('hidden');
+          }
+        }
+
+        async function pollJob(jobId, onDone) {
+          const poll = async () => {
+            try {
+              const info = await api(`/api/admin/jobs/${jobId}`);
+              if (info.status === 'running' || info.status === 'queued') {
+                fundingState.jobPollers.set(jobId, setTimeout(poll, 1200));
+                return;
+              }
+              fundingState.jobPollers.delete(jobId);
+              onDone(info);
+            } catch (err) {
+              fundingState.jobPollers.delete(jobId);
+              onDone({ status: 'error', error: err.message || String(err) });
+            }
+          };
+          await poll();
+        }
+
+        async function enqueueScopedRebuild(scope, actor = 'UI') {
+          try {
+            const query = scope ? `?only_for=${encodeURIComponent(`${scope.entity_type}:${scope.entity_id}`)}` : '';
+            const job = await api(`/api/admin/rebuild-effective-tags${query}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ actor }),
+            });
+            showBanner('Updating tags…', 'info');
+            await pollJob(job.id, (info) => {
+              if (info.status === 'success') {
+                showBanner('Tags updated', 'success');
+                hideBanner(1200);
+              } else {
+                showBanner(`Tag rebuild failed: ${info.error || 'unknown error'}`, 'error');
+              }
+            });
+          } catch (err) {
+            showError(err);
+          }
+        }
+
+        function clearFundingState() {
+          fundingState.budgets = [];
+          fundingState.filteredBudgets = [];
+          fundingState.selectedBudgetId = null;
+          fundingState.budgetMap.clear();
+          fundingState.budgetTree = [];
+          fundingState.expanded.clear();
+        }
+
+        async function fetchTagsCached(query = '') {
+          const needle = query.trim().toLowerCase();
+          if (fundingState.tagCache.has(needle)) return fundingState.tagCache.get(needle);
+          const list = await api(`/api/tags${needle ? `?q=${encodeURIComponent(needle)}` : ''}`);
+          fundingState.tagCache.set(needle, list);
+          return list;
+        }
+
+        async function refreshTagUsage() {
+          fundingState.usageCache = await api('/api/tags/usage');
+          return fundingState.usageCache;
+        }
+
+        function getUsageFor(tagId) {
+          if (!fundingState.usageCache) return null;
+          const entry = fundingState.usageCache.find(item => item.tag.id === tagId);
+          return entry ? entry.assignments : null;
+        }
+
+        function formatTagLabel(tag) {
+          return `#${tag.name}`;
+        }
+
+        const TAG_PICKERS = new Set();
+        const TAG_EDITORS = new Set();
+
+        function closeAllPopovers(except = null) {
+          TAG_PICKERS.forEach(p => { if (p !== except) p.destroy(); });
+          TAG_EDITORS.forEach(p => { if (p !== except) p.destroy(); });
+        }
+
+        document.addEventListener('click', (evt) => {
+          const target = evt.target;
+          const inPicker = target.closest?.('.tag-picker-panel');
+          const inEditor = target.closest?.('.tag-editor-panel');
+          if (!inPicker) TAG_PICKERS.forEach(p => p.destroy());
+          if (!inEditor) TAG_EDITORS.forEach(p => p.destroy());
+        });
+
+        function toScopeType(nodeType) {
+          if (nodeType === 'project') return 'item_project';
+          return nodeType;
+        }
+
+        function mutateBundle(bundle, updater) {
+          if (!bundle) return;
+          ['direct', 'inherited', 'effective'].forEach(key => {
+            const list = bundle[key];
+            if (!Array.isArray(list)) return;
+            bundle[key] = list.map(item => updater({ ...item }))
+              .filter(Boolean);
+          });
+        }
+
+        function applyTagUpdate(updated) {
+          const apply = (bundle) => mutateBundle(bundle, chip => {
+            if (chip.id === updated.id) {
+              chip.name = updated.name;
+              chip.color = updated.color;
+              chip.is_deprecated = updated.is_deprecated;
+            }
+            return chip;
+          });
+          fundingState.budgets.forEach(b => apply(b.tags));
+          fundingState.budgetTree.forEach(node => apply(node.tags));
+          fundingState.budgetMap.forEach(budget => apply(budget.tags));
+        }
+
+        function removeTagFromBundles(tagId, scope) {
+          const predicate = (chip) => (chip.id === tagId && (!scope || toScopeType(scope.entity_type) === toScopeType(scope.type)));
+          const remove = (bundle) => mutateBundle(bundle, chip => predicate(chip) ? null : chip);
+          fundingState.budgets.forEach(b => remove(b.tags));
+          fundingState.budgetTree.forEach(node => remove(node.tags));
+          fundingState.budgetMap.forEach(budget => remove(budget.tags));
+        }
+
+        function updateTagCaches(tag) {
+          fundingState.tagCache.forEach((arr, key) => {
+            const idx = arr.findIndex(t => t.id === tag.id);
+            if (idx >= 0) arr[idx] = { ...arr[idx], ...tag };
+          });
+        }
+
+        function destroyPopover(popover, set) {
+          if (!popover) return;
+          popover.remove();
+          set.delete(popover.__controller);
+        }
+
+        function positionPopover(panel, anchor, offsetY = 6) {
+          const rect = anchor.getBoundingClientRect();
+          const bodyRect = document.body.getBoundingClientRect();
+          const top = rect.bottom + offsetY;
+          const left = Math.min(rect.left, window.innerWidth - panel.offsetWidth - 16);
+          panel.style.top = `${Math.max(8, top + window.scrollY)}px`;
+          panel.style.left = `${Math.max(8, left + window.scrollX)}px`;
+        }
+
+        function createTagChip(tag, { inherited = false, onEdit, onRemove } = {}) {
+          const chip = document.createElement('span');
+          chip.className = `tag-chip${inherited ? ' tag-chip-inherited' : ''}${tag.is_deprecated ? ' tag-chip-deprecated' : ''}`;
+          chip.dataset.tagId = tag.id;
+          const swatch = document.createElement('span');
+          swatch.className = 'tag-swatch';
+          swatch.style.background = tag.color || '#3b4866';
+          chip.appendChild(swatch);
+          const label = document.createElement('span');
+          label.className = 'tag-label';
+          label.textContent = `#${tag.name}`;
+          chip.appendChild(label);
+          if (onEdit) {
+            const editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.className = 'tag-chip-btn tag-chip-edit';
+            editBtn.title = 'Edit tag';
+            editBtn.textContent = '✎';
+            editBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              onEdit(tag, chip, evt);
+            });
+            chip.appendChild(editBtn);
+          }
+          if (!inherited && onRemove) {
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'tag-chip-btn tag-chip-remove';
+            removeBtn.title = 'Remove tag';
+            removeBtn.textContent = '×';
+            removeBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              onRemove(tag, chip, evt);
+            });
+            chip.appendChild(removeBtn);
+          }
+          return chip;
+        }
+
+        function formatUsageSummary(assignments) {
+          if (!assignments) return '';
+          const parts = Object.entries(assignments).filter(([, v]) => v > 0).map(([k, v]) => `${k}: ${v}`);
+          return parts.join(', ');
+        }
+
+        function openTagEditor(anchor, tag, { onSaved } = {}) {
+          closeAllPopovers();
+          const panel = document.createElement('div');
+          panel.className = 'tag-editor-panel';
+          panel.innerHTML = `
+            <div class="tag-editor">
+              <div class="tag-editor-header">
+                <span class="tag-editor-title">Edit tag</span>
+                <button type="button" class="tag-editor-close">×</button>
+              </div>
+              <label class="tag-editor-field">Name
+                <div class="tag-editor-input-group">
+                  <span>#</span>
+                  <input type="text" class="tag-editor-name" value="${escapeHtml(tag.name)}" autocomplete="off" />
+                </div>
+              </label>
+              <label class="tag-editor-field">Color
+                <input type="color" class="tag-editor-color" value="${tag.color || randomTagColor()}" />
+              </label>
+              <label class="tag-editor-field">Description
+                <textarea class="tag-editor-desc" rows="3" placeholder="Optional">${escapeHtml(tag.description || '')}</textarea>
+              </label>
+              <label class="tag-editor-field checkbox"><input type="checkbox" class="tag-editor-deprecated" ${tag.is_deprecated ? 'checked' : ''}/> Deprecated</label>
+              <div class="tag-editor-actions">
+                <button type="button" class="tag-editor-save">Save</button>
+                <button type="button" class="tag-editor-delete">Delete</button>
+              </div>
+            </div>`;
+          document.body.appendChild(panel);
+          positionPopover(panel, anchor, 8);
+
+          const controller = {
+            destroy() {
+              destroyPopover(panel, TAG_EDITORS);
+            },
+          };
+          panel.__controller = controller;
+          TAG_EDITORS.add(controller);
+
+          const nameInput = panel.querySelector('.tag-editor-name');
+          const colorInput = panel.querySelector('.tag-editor-color');
+          const descInput = panel.querySelector('.tag-editor-desc');
+          const deprecatedInput = panel.querySelector('.tag-editor-deprecated');
+          const deleteBtn = panel.querySelector('.tag-editor-delete');
+          const closeBtn = panel.querySelector('.tag-editor-close');
+          const saveBtn = panel.querySelector('.tag-editor-save');
+
+          let deleteDisabled = false;
+          (async () => {
+            try {
+              const usage = await (fundingState.usageCache ? Promise.resolve(fundingState.usageCache) : refreshTagUsage());
+              const entry = usage.find(item => item.tag.id === tag.id);
+              const assignments = entry ? entry.assignments : null;
+              const summary = formatUsageSummary(assignments);
+              if (summary) {
+                deleteBtn.disabled = true;
+                deleteBtn.title = `Cannot delete — in use (${summary})`;
+                deleteDisabled = true;
+              }
+            } catch (err) {
+              console.warn('Usage lookup failed', err);
+            }
+          })();
+
+          closeBtn.onclick = () => controller.destroy();
+
+          async function persistChanges() {
+            const newName = nameInput.value.trim().toLowerCase();
+            if (!newName.match(/^[a-z0-9_.:-]+$/)) {
+              alert('Tag names must be lowercase alphanumerics or - _ . :');
+              return;
+            }
+            const updates = {};
+            const patch = {};
+            if (newName && newName !== tag.name) {
+              updates.name = newName;
+            }
+            const newColor = colorInput.value || null;
+            if ((tag.color || '').toLowerCase() !== (newColor || '').toLowerCase()) {
+              patch.color = newColor;
+            }
+            const newDesc = descInput.value.trim() || null;
+            if ((tag.description || '') !== (newDesc || '')) {
+              patch.description = newDesc;
+            }
+            const newDeprecated = !!deprecatedInput.checked;
+            if (!!tag.is_deprecated !== newDeprecated) {
+              patch.is_deprecated = newDeprecated;
+            }
+
+            try {
+              let current = { ...tag };
+              if (Object.keys(updates).length) {
+                const renamed = await api(`/api/tags/${tag.id}/rename`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ name: updates.name, actor: 'UI' }),
+                });
+                current = { ...current, ...renamed };
+              }
+              if (Object.keys(patch).length) {
+                const patched = await api(`/api/tags/${tag.id}`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ ...patch, actor: 'UI' }),
+                });
+                current = { ...current, ...patched };
+              }
+              updateTagCaches(current);
+              applyTagUpdate(current);
+              fundingState.tagCache.delete('');
+              if (typeof onSaved === 'function') onSaved(current);
+              controller.destroy();
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          async function deleteTag() {
+            if (deleteDisabled) return;
+            if (!confirm(`Delete tag #${tag.name}? This cannot be undone.`)) return;
+            try {
+              await api(`/api/tags/${tag.id}`, { method: 'DELETE' });
+              removeTagFromBundles(tag.id);
+              fundingState.tagCache.forEach((arr, key) => {
+                fundingState.tagCache.set(key, arr.filter(t => t.id !== tag.id));
+              });
+              if (typeof onSaved === 'function') onSaved(null);
+              controller.destroy();
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          panel.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Escape') {
+              evt.preventDefault();
+              controller.destroy();
+            }
+            if (evt.key === 'Enter' && !evt.shiftKey) {
+              evt.preventDefault();
+              persistChanges();
+            }
+          });
+
+          saveBtn.onclick = persistChanges;
+          deleteBtn.onclick = deleteTag;
+        }
+
+        function openTagPicker(anchor, { node, directIds = new Set(), onAssigned, onCreated } = {}) {
+          closeAllPopovers();
+          const panel = document.createElement('div');
+          panel.className = 'tag-picker-panel';
+          panel.innerHTML = `
+            <div class="tag-picker">
+              <input class="tag-search" placeholder="Search or create…" />
+              <div class="tag-results tag-loading">
+                <div class="tag-row skeleton"></div>
+                <div class="tag-row skeleton"></div>
+                <div class="tag-row skeleton"></div>
+              </div>
+            </div>`;
+          document.body.appendChild(panel);
+          positionPopover(panel, anchor);
+
+          const controller = {
+            destroy() {
+              if (!panel.isConnected) return;
+              panel.remove();
+              TAG_PICKERS.delete(controller);
+            }
+          };
+          panel.__controller = controller;
+          TAG_PICKERS.add(controller);
+
+          const scope = { entity_type: toScopeType(node.type), entity_id: node.id };
+          const inputEl = panel.querySelector('.tag-search');
+          const resultsEl = panel.querySelector('.tag-results');
+          let query = '';
+          let results = [];
+          let highlight = -1;
+          let loading = false;
+          let pending;
+
+          const inheritedIds = new Set((node.tags?.inherited || []).map(t => t.id));
+
+          function renderRows(list) {
+            resultsEl.innerHTML = '';
+            if (!list.length && query) {
+              const createRow = document.createElement('div');
+              createRow.className = 'tag-row create';
+              createRow.textContent = `Create tag “#${query}”`;
+              createRow.tabIndex = 0;
+              createRow.addEventListener('click', () => createTag(query));
+              resultsEl.appendChild(createRow);
+              highlight = 0;
+              return;
+            }
+            list.forEach((tag, idx) => {
+              const row = document.createElement('div');
+              row.className = 'tag-row';
+              if (tag.is_deprecated) row.classList.add('disabled');
+              if (directIds.has(tag.id)) {
+                row.classList.add('disabled');
+                row.title = 'Already assigned';
+              }
+              const swatch = document.createElement('span');
+              swatch.className = 'tag-swatch';
+              swatch.style.background = tag.color || '#4b5771';
+              row.appendChild(swatch);
+              const name = document.createElement('span');
+              name.className = 'tag-name';
+              name.textContent = `#${tag.name}`;
+              row.appendChild(name);
+              if (tag.description) {
+                const desc = document.createElement('span');
+                desc.className = 'tag-desc';
+                desc.textContent = tag.description;
+                row.appendChild(desc);
+              }
+              if (tag.is_deprecated) {
+                const badge = document.createElement('span');
+                badge.className = 'tag-badge';
+                badge.textContent = 'Deprecated';
+                row.appendChild(badge);
+              }
+              const editBtn = document.createElement('button');
+              editBtn.type = 'button';
+              editBtn.className = 'tag-row-edit';
+              editBtn.textContent = '✎';
+              editBtn.title = 'Edit tag';
+              editBtn.addEventListener('click', (evt) => {
+                evt.stopPropagation();
+                openTagEditor(editBtn, tag, {
+                  onSaved: (updated) => {
+                    if (updated) {
+                      tag.name = updated.name;
+                      tag.color = updated.color;
+                      tag.description = updated.description;
+                      tag.is_deprecated = updated.is_deprecated;
+                      updateTagCaches(updated);
+                      renderRows(results);
+                    } else {
+                      results = results.filter(x => x.id !== tag.id);
+                      renderRows(results);
+                    }
+                  },
+                });
+              });
+              row.appendChild(editBtn);
+              row.addEventListener('click', () => {
+                if (row.classList.contains('disabled')) return;
+                assignTag(tag);
+              });
+              if (idx === highlight) row.classList.add('highlight');
+              resultsEl.appendChild(row);
+            });
+          }
+
+          async function assignTag(tag) {
+            try {
+              await api('/api/tags/assign', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tag_id: tag.id, entity_type: scope.entity_type, entity_id: scope.entity_id, actor: 'UI' }),
+              });
+              controller.destroy();
+              if (typeof onAssigned === 'function') await Promise.resolve(onAssigned(tag));
+              enqueueScopedRebuild(scope);
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          async function createTag(nameInput) {
+            const clean = nameInput.trim().toLowerCase();
+            if (!clean.match(/^[a-z0-9_.:-]+$/)) {
+              alert('Tag names must be lowercase alphanumerics or - _ . :');
+              return;
+            }
+            try {
+              const newTag = await api('/api/tags', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: clean, color: randomTagColor(), actor: 'UI' }),
+              });
+              fundingState.tagCache.clear();
+              if (typeof onCreated === 'function') await Promise.resolve(onCreated(newTag));
+              await assignTag(newTag);
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          const load = async () => {
+            loading = true;
+            resultsEl.classList.add('tag-loading');
+            try {
+              const res = await fetchTagsCached(query);
+              results = res.filter(tag => !directIds.has(tag.id));
+              resultsEl.classList.remove('tag-loading');
+              loading = false;
+              highlight = results.length ? 0 : -1;
+              renderRows(results);
+            } catch (err) {
+              showError(err);
+            }
+          };
+
+          inputEl.addEventListener('input', () => {
+            if (pending) clearTimeout(pending);
+            query = inputEl.value.trim();
+            pending = setTimeout(load, 220);
+          });
+
+          panel.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Escape') {
+              evt.preventDefault();
+              controller.destroy();
+            }
+            if (evt.key === 'ArrowDown') {
+              evt.preventDefault();
+              if (!results.length) return;
+              highlight = (highlight + 1) % results.length;
+              renderRows(results);
+            }
+            if (evt.key === 'ArrowUp') {
+              evt.preventDefault();
+              if (!results.length) return;
+              highlight = (highlight - 1 + results.length) % results.length;
+              renderRows(results);
+            }
+            if (evt.key === 'Enter') {
+              evt.preventDefault();
+              if (highlight >= 0 && results[highlight]) {
+                assignTag(results[highlight]);
+              } else if (!results.length && query) {
+                createTag(query);
+              }
+            }
+          });
+
+          load();
+          inputEl.focus();
+        }
+
+
 
         function ensureReallocateDrawer() {
           if (reallocateDrawer) return reallocateDrawer;
@@ -864,7 +1638,6 @@
 
             const ALLOW = {
               '/api/portfolios': ['name','fiscal_year','owner'],
-              '/api/project-groups': ['code','name','description'],
               '/api/projects': ['portfolio_id','name','group_id','code','line'],
               '/api/categories': ['name','parent_id','project_id'],
               '/api/vendors': ['name'],
@@ -896,242 +1669,1164 @@
   
         // ---------- Renderers ----------
         async function renderPortfolios(){
-          const portfolios = await apiList('/api/portfolios');
-          content.innerHTML =
-            card('Add Funding Source', `
-              <div class="row">
-                ${field('name', labelFor('name','Name', 'e.g., "FY25 CapEx – Line EX6".'), input('name','FY25 CapEx'))}
-                ${field('fiscal_year', labelFor('fiscal_year','Fiscal Year', 'Optional metadata (FY25 or 2025).'), input('fiscal_year','FY25'))}
-                ${field('owner', labelFor('owner','Owner', 'Approver / controller.'), input('owner','Dan'))}
-                <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
-              </div>`)
-            + card('All Funding Sources', table(portfolios, [
-              { key: 'id', label: 'ID' },
-              { key: 'name', label: 'Funding Source Name' },
-              { key: 'fiscal_year', label: 'Fiscal Year' },
-              { key: 'owner', label: 'Owner' },
-            ], '/api/portfolios'));
+          clearFundingState();
+          fundingState.searchTerm = '';
+          fundingState.tagCache.clear();
+          fundingState.usageCache = null;
 
-          initializeDropdowns(content);
+          content.innerHTML = `
+            <div class="funding-shell">
+              <aside class="funding-sidebar">
+                <div class="funding-toolbar">
+                  <div class="funding-toolbar-actions">
+                    <button id="newBudgetButton" class="btn-primary">+ New Budget</button>
+                    <button id="tagManagerButton">Tag Manager</button>
+                    <button id="rebuildTagsButton">Rebuild Effective Tags</button>
+                  </div>
+                  <input id="budgetSearch" class="input" placeholder="Search budgets…" autocomplete="off" />
+                </div>
+                <div id="fundingList" class="funding-list"></div>
+              </aside>
+              <section id="fundingLedger" class="funding-ledger">
+                <div class="funding-empty">Select a funding source to inspect.</div>
+              </section>
+              <aside id="inspectorDrawer" class="drawer hidden"></aside>
+            </div>`;
 
-          const add = document.getElementById('add');
-          if (add) add.onclick = async ()=>{
-            const [name, fiscal_year, owner] = [...content.querySelectorAll('input')].map(i=>i.value);
-            if(!name) return alert('Name required');
-            await apiCreate('/api/portfolios', {name, fiscal_year, owner});
-            renderPortfolios();
-          };
-        }
-  
-        async function renderProjectGroups(){
-          const pgs = await apiList('/api/project-groups');
-          content.innerHTML =
-            card('Add Project Group', `
-              <div class="row">
-                ${field('code', labelFor('code','Code', 'Short code shared across funding sources e.g., "COBRA".'), input('code','COBRA'))}
-                ${field('name', labelFor('name','Name', 'Program name (rollup label).'), input('name','Cobra Program'))}
-                ${field('description', labelFor('description','Description','What counts as this program.'), `<textarea class="input" name="description" rows="1" placeholder="Optional"></textarea>`)}
-                <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
-              </div>`)
-            + card('All Project Groups', table(pgs, [
-              { key: 'id', label: 'ID' },
-              { key: 'code', label: 'Code' },
-              { key: 'name', label: 'Project Group Name' },
-              { key: 'description', label: 'Description' },
-            ], '/api/project-groups'));
+          const listEl = content.querySelector('#fundingList');
+          const ledgerEl = content.querySelector('#fundingLedger');
+          const inspectorEl = content.querySelector('#inspectorDrawer');
+          const searchInput = content.querySelector('#budgetSearch');
+          const newBudgetBtn = content.querySelector('#newBudgetButton');
+          const tagManagerBtn = content.querySelector('#tagManagerButton');
+          const rebuildBtn = content.querySelector('#rebuildTagsButton');
 
-          initializeDropdowns(content);
-          const add = document.getElementById('add');
-          if (add) add.onclick = async ()=>{
-            const code = content.querySelector('input[name=code]').value;
-            const name = content.querySelector('input[name=name]').value;
-            const description = content.querySelector('textarea[name=description]').value;
-            if(!name) return alert('Name required');
-            await apiCreate('/api/project-groups', {code:code||null, name, description:description||null});
-            renderProjectGroups();
-          };
-        }
-  
-        async function renderProjects(){
-          const [portfolios, pgs, projects] = await Promise.all([
-            apiList('/api/portfolios'), apiList('/api/project-groups'), apiList('/api/projects')
-          ]);
-          const portfolioOpts = portfolios.map(p => ({ value: p.id, label: formatPortfolioLabel(p), raw: p }));
-          const basePortfolioHandlers = buildResourceDropdownHandlers('/api/portfolios', {
-            formatLabel: formatPortfolioLabel,
-            buildCreateBody: (label) => ({ name: label }),
-            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
-            matcherFields: ['fiscal_year', 'owner', 'type', 'car_code', 'cc_code'],
-          });
-          const portfolioHandlers = { key: 'portfolio', ...basePortfolioHandlers };
-          const pgOpts = [{ value: '', label: '(none)', raw: null }].concat(
-            pgs.map(pg => ({ value: pg.id, label: formatProjectGroupLabel(pg), raw: pg }))
-          );
-          const baseProjectGroupHandlers = buildResourceDropdownHandlers('/api/project-groups', {
-            formatLabel: formatProjectGroupLabel,
-            buildCreateBody: (label) => ({ name: label }),
-            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
-            matcherFields: ['code', 'description'],
-          });
-          const projectGroupHandlers = { key: 'project-group', ...baseProjectGroupHandlers };
-          const projectGroupOptions = pgs.map(pg => ({ value: pg.id, label: formatProjectGroupLabel(pg), raw: pg }));
-          const originalGroupCreate = projectGroupHandlers.create;
-          projectGroupHandlers.create = async (label) => {
-            const created = await originalGroupCreate(label);
-            if (created && created.value !== undefined) {
-              projectGroupOptions.push({ value: created.value, label: created.label, raw: created.raw });
+          const makeKey = (node) => `${node.type}:${node.id}`;
+
+          const expansionStorageKey = (budgetId) => `funding-expanded-${budgetId}`;
+
+          function loadExpansionState(budgetId, availableKeys) {
+            if (!budgetId) return null;
+            try {
+              const raw = localStorage.getItem(expansionStorageKey(budgetId));
+              if (!raw) return null;
+              const parsed = JSON.parse(raw);
+              if (!Array.isArray(parsed)) return null;
+              const set = new Set();
+              parsed.forEach(key => {
+                if (!availableKeys || availableKeys.has(key)) set.add(key);
+              });
+              return set;
+            } catch (err) {
+              console.warn('Failed to load expansion state', err);
+              return null;
             }
-            return created;
-          };
+          }
 
-          content.innerHTML =
-            card('Add Project', `
-              <div class="row">
-                ${field('portfolio_id', labelFor('portfolio_id','Funding Source', 'Each project belongs to a single funding source.'), select('portfolio_id', portfolioOpts, portfolioHandlers))}
-                ${field('name', labelFor('name','Project Name', 'Per funding source project name (duplicates allowed across funding sources).'), input('name','Cobra'))}
-                ${field('group_id', labelFor('group_id','Project Group', 'Use to roll up similar projects across funding sources.'), select('group_id', pgOpts, projectGroupHandlers))}
-                ${field('code', labelFor('code','Project Code (optional)','Internal alias'), input('code','COBRA-PM1'))}
-                ${field('line', labelFor('line','Line/Asset (optional)','e.g., EX6'), input('line','EX6'))}
-                <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
-              </div>`)
-            + card('All Projects', table(projects, [
-              { key: 'id', label: 'ID' },
-              { key: 'portfolio_id', label: 'Funding Source' },
-              { key: 'name', label: 'Project Name' },
-              { key: 'group_id', label: 'Project Group' },
-              { key: 'code', label: 'Project Code' },
-              { key: 'line', label: 'Line / Asset' },
-            ], '/api/projects'));
+          function persistExpansionState(budgetId, set = fundingState.expanded) {
+            if (!budgetId) return;
+            try {
+              localStorage.setItem(expansionStorageKey(budgetId), JSON.stringify([...set]));
+            } catch (err) {
+              console.warn('Failed to persist expansion state', err);
+            }
+          }
 
-          initializeDropdowns(content);
-          setupTableEditing(content, '/api/projects', projects, {
-            portfolio_id: {
-              type: 'dropdown',
-              options: portfolioOpts,
-              handlers: portfolioHandlers,
-              valueType: 'number',
-            },
-            group_id: {
-              type: 'dropdown',
-              getOptions: () => projectGroupOptions,
-              handlers: projectGroupHandlers,
-              valueType: 'number',
-              allowNull: true,
-              nullOptionLabel: '(none)',
-            },
-          });
+          async function loadBudgets(term = '') {
+            fundingState.searchTerm = term;
+            const query = term ? `/api/budgets?include=stats,tags&q=${encodeURIComponent(term)}` : '/api/budgets?include=stats,tags';
+            const budgets = await api(query);
+            fundingState.budgets = budgets;
+            fundingState.filteredBudgets = budgets;
+            fundingState.budgetMap = new Map(budgets.map(b => [b.id, b]));
+          }
 
-          const add = document.getElementById('add');
-          if (add) add.onclick = async ()=>{
-            const body = {
-              portfolio_id: Number(content.querySelector('select[name=portfolio_id]').value),
-              name: content.querySelector('input[name=name]').value,
-              group_id: content.querySelector('select[name=group_id]').value ? Number(content.querySelector('select[name=group_id]').value) : null,
-              code: content.querySelector('input[name=code]').value || null,
-              line: content.querySelector('input[name=line]').value || null
+          async function loadBudgetTree(budgetId) {
+            if (!budgetId) {
+              ledgerEl.innerHTML = '<div class="funding-empty">Select a funding source to inspect.</div>';
+              return;
+            }
+            const nodes = await api(`/api/budgets/${budgetId}/tree?include=tags,paths,assets`);
+            fundingState.budgetTree = nodes;
+            const hierarchy = buildHierarchy(nodes);
+            fundingState.currentHierarchy = hierarchy;
+            const availableKeys = new Set(nodes.map(node => makeKey(node)));
+            const savedExpansion = loadExpansionState(budgetId, availableKeys);
+            fundingState.expanded.clear();
+            if (savedExpansion && savedExpansion.size) {
+              savedExpansion.forEach(key => fundingState.expanded.add(key));
+            } else {
+              const queue = hierarchy ? [hierarchy] : [];
+              while (queue.length) {
+                const node = queue.shift();
+                const key = makeKey(node);
+                if (availableKeys.has(key)) fundingState.expanded.add(key);
+                if (node.children && node.children.length) {
+                  queue.push(...node.children);
+                }
+              }
+            }
+            if (hierarchy) {
+              fundingState.expanded.add(makeKey(hierarchy));
+            }
+            persistExpansionState(budgetId);
+            renderLedger();
+          }
+
+          function buildHierarchy(nodes) {
+            if (!nodes || !nodes.length) return null;
+            const budgetNode = nodes.find(n => n.type === 'budget');
+            if (!budgetNode) return null;
+            const projectMap = new Map();
+            const categoryMap = new Map();
+            nodes.forEach(node => {
+              if (node.type === 'project') {
+                node.children = [];
+                projectMap.set(node.id, node);
+              } else if (node.type === 'category') {
+                node.children = [];
+                categoryMap.set(node.id, node);
+              }
+            });
+            nodes.forEach(node => {
+              if (node.type === 'category') {
+                if (node.parent_id) {
+                  const parent = categoryMap.get(node.parent_id);
+                  if (parent) parent.children.push(node);
+                } else {
+                  const parentProject = projectMap.get(node.project_id || node.item_project_id);
+                  if (parentProject) parentProject.children.push(node);
+                }
+              }
+            });
+            budgetNode.children = Array.from(projectMap.values());
+            fundingState.projectNodeMap = projectMap;
+            fundingState.categoryNodeMap = categoryMap;
+            return budgetNode;
+          }
+
+          function renderBudgetList() {
+            listEl.innerHTML = '';
+            if (!fundingState.budgets.length) {
+              const empty = document.createElement('div');
+              empty.className = 'funding-list-empty';
+              empty.textContent = 'No funding sources found.';
+              listEl.appendChild(empty);
+              return;
+            }
+            fundingState.budgets.forEach(budget => {
+              const item = document.createElement('button');
+              item.className = 'funding-item';
+              item.innerHTML = `
+                <div class="funding-item-name">${escapeHtml(budget.name)}</div>
+                <div class="funding-item-meta">Owner: ${escapeHtml(budget.owner || '—')}</div>
+                <div class="funding-item-total">${fmtCurrency(budget.budget_amount_cache)}</div>`;
+              if (budget.id === fundingState.selectedBudgetId) item.classList.add('active');
+              item.addEventListener('click', () => selectBudget(budget.id));
+              listEl.appendChild(item);
+            });
+          }
+
+          function attachTagRow(container, node) {
+            const scope = { entity_type: toScopeType(node.type), entity_id: node.id, type: node.type };
+            const tagLine = document.createElement('div');
+            tagLine.className = 'tag-chip-row';
+            const tags = node.tags || { direct: [], inherited: [] };
+            const directIds = new Set((tags.direct || []).map(t => t.id));
+
+            const handleAssign = async () => {
+              await refreshCurrentBudget();
             };
-            if(!body.name) return alert('Project name required');
-            await apiCreate('/api/projects', body);
-            renderProjects();
-          };
-        }
-  
-        async function renderCategories(){
-          const [projects, categories] = await Promise.all([apiList('/api/projects'), apiList('/api/categories')]);
-          const categoryMap = mapBy(categories);
-          const projectMap = mapBy(projects);
 
-          const projOpts = [{ value: '', label: '(Global)', raw: null }].concat(projects.map(p=>({
-            value: p.id,
-            label: `Project #${p.id} — ${p.name} [Funding Source ${p.portfolio_id}]`,
-            raw: p,
-          })));
-          const projectHandlers = { key: 'project', ...buildResourceDropdownHandlers('/api/projects', {
-            formatLabel: (p) => `Project #${p.id} — ${p.name} [Funding Source ${p.portfolio_id}]`,
-            buildCreateBody: (label) => ({ name: label, portfolio_id: projects[0]?.portfolio_id ?? 1 }),
-            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
-            matcherFields: ['portfolio_id', 'code', 'line'],
-          }) };
-          const catOpts = [{ value: '', label: '(No parent)', raw: null }].concat(categories.map(c=>({
-            value: c.id,
-            label: catPath(c, categoryMap),
-            raw: c,
-          })));
-          const categoryHandlers = { key: 'category', ...buildResourceDropdownHandlers('/api/categories', {
-            formatLabel: (c) => catPath(c, { ...categoryMap, [c.id]: c }),
-            buildCreateBody: (label) => ({ name: label }),
-            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
-            matcherFields: ['project_id', 'parent_id'],
-          }) };
+            const handleRemove = async (tag) => {
+              try {
+                await api('/api/tags/assign', {
+                  method: 'DELETE',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ tag_id: tag.id, entity_type: scope.entity_type, entity_id: scope.entity_id, actor: 'UI' }),
+                });
+                await refreshCurrentBudget();
+                enqueueScopedRebuild(scope);
+              } catch (err) {
+                showError(err);
+              }
+            };
 
-          const parentOptions = categories.map(c => ({ value: c.id, label: catPath(c, categoryMap), raw: c }));
-          const projectOptions = projects.map(p => ({ value: p.id, label: `Project #${p.id} — ${p.name}`, raw: p }));
-          const originalProjectCreateForCategories = projectHandlers.create;
-          projectHandlers.create = async (label) => {
-            const created = await originalProjectCreateForCategories(label);
-            if (created && created.value !== undefined) {
-              projectOptions.push({ value: created.value, label: created.label, raw: created.raw });
+            const handleEdit = (tag, anchor) => {
+              openTagEditor(anchor, tag, {
+                onSaved: async (updated) => {
+                  if (!updated) {
+                    await refreshCurrentBudget();
+                    return;
+                  }
+                  applyTagUpdate(updated);
+                  await refreshCurrentBudget();
+                },
+              });
+            };
+
+            (tags.direct || []).forEach(tag => {
+              const chip = createTagChip(tag, {
+                inherited: false,
+                onEdit: handleEdit,
+                onRemove: (t, anchor) => handleRemove(t, anchor),
+              });
+              chip.addEventListener('click', (evt) => {
+                if (evt.target === chip) handleEdit(tag, chip);
+              });
+              tagLine.appendChild(chip);
+            });
+
+            (tags.inherited || []).forEach(tag => {
+              const chip = createTagChip(tag, {
+                inherited: true,
+                onEdit: handleEdit,
+              });
+              chip.addEventListener('click', () => handleEdit(tag, chip));
+              tagLine.appendChild(chip);
+            });
+
+            const addBtn = document.createElement('button');
+            addBtn.type = 'button';
+            addBtn.className = 'tag-add-btn';
+            addBtn.textContent = '+ Add tag';
+            addBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openTagPicker(addBtn, {
+                node,
+                directIds,
+                onAssigned: handleAssign,
+                onCreated: async () => {
+                  await refreshTagUsage();
+                },
+              });
+            });
+            tagLine.appendChild(addBtn);
+            container.appendChild(tagLine);
+          }
+
+          async function saveBudgetPatch(budgetId, patch) {
+            if (!patch || !Object.keys(patch).length) return;
+            try {
+              await api(`/api/budgets/${budgetId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(patch),
+              });
+              await refreshCurrentBudget();
+            } catch (err) {
+              showError(err);
             }
+          }
+
+          async function saveProjectPatch(projectId, patch) {
+            if (!patch || !Object.keys(patch).length) return;
+            try {
+              await api(`/api/item-projects/${projectId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(patch),
+              });
+              await refreshCurrentBudget();
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          async function ensureLineAsset(name) {
+            const trimmed = (name || '').trim();
+            if (!trimmed) return null;
+            const key = trimmed.toLowerCase();
+            if (fundingState.lineAssetCache.has(key)) return fundingState.lineAssetCache.get(key);
+            try {
+              const candidates = await api(`/api/line-assets?q=${encodeURIComponent(trimmed)}`);
+              const match = (candidates || []).find(asset => asset.name.toLowerCase() === key);
+              if (match) {
+                fundingState.lineAssetCache.set(key, match);
+                return match;
+              }
+            } catch (err) {
+              console.warn('line asset lookup failed', err);
+            }
+            const created = await apiCreate('/api/line-assets', { name: trimmed });
+            fundingState.lineAssetCache.set(key, created);
             return created;
-          };
-          const originalProjectEditForCategories = projectHandlers.edit;
-          projectHandlers.edit = async (option, nextLabel) => {
-            const updated = await originalProjectEditForCategories(option, nextLabel);
-            const target = projectOptions.find(opt => opt.value === updated.value);
-            if (target) target.label = updated.label;
-            return updated;
+          }
+
+          async function attachAssetToProject(projectId, assetId) {
+            await api(`/api/item-projects/${projectId}/line-assets`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ line_asset_id: assetId }),
+            });
+          }
+
+          async function detachAssetFromProject(projectId, assetId) {
+            await api(`/api/item-projects/${projectId}/line-assets/${assetId}`, {
+              method: 'DELETE',
+            });
+          }
+
+          async function saveCategoryPatch(categoryId, patch) {
+            if (!patch || !Object.keys(patch).length) return;
+            try {
+              if (patch.amount_leaf !== undefined && patch.amount_leaf !== null) {
+                patch.amount_leaf = Number(patch.amount_leaf);
+              }
+              await api(`/api/categories/${categoryId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(patch),
+              });
+              await refreshCurrentBudget();
+            } catch (err) {
+              showError(err);
+            }
+          }
+
+          function getProjectNode(projectId) {
+            return fundingState.projectNodeMap.get(projectId) || null;
+          }
+
+          function getCategoryNode(categoryId) {
+            return fundingState.categoryNodeMap.get(categoryId) || null;
+          }
+
+          function collectDescendantIds(node, set) {
+            if (!node) return;
+            set.add(node.id);
+            (node.children || []).forEach(child => collectDescendantIds(child, set));
+          }
+
+          function buildMoveOptions(projectNode, excludeIds) {
+            const options = [];
+            if (projectNode) {
+              options.push({ value: `project:${projectNode.id}`, label: `${projectNode.name} (Project root)` });
+              const queue = [...(projectNode.children || [])];
+              while (queue.length) {
+                const node = queue.shift();
+                if (!node) continue;
+                if (excludeIds.has(node.id)) {
+                  continue;
+                }
+                const label = (node.path_names && node.path_names.length)
+                  ? node.path_names.join(' › ')
+                  : node.name;
+                options.push({ value: `category:${node.id}`, label });
+                (node.children || []).forEach(child => queue.push(child));
+              }
+            }
+            return options;
+          }
+
+          function openCategoryModal({ projectNode, parentCategory = null, isLeaf = false }) {
+            if (!projectNode) return;
+            const parentName = parentCategory
+              ? (parentCategory.path_names && parentCategory.path_names.length
+                  ? parentCategory.path_names.join(' › ')
+                  : parentCategory.name)
+              : projectNode.name;
+            openFormModal({
+              title: isLeaf ? `New Leaf under ${parentName}` : `New Category under ${parentName}`,
+              submitLabel: isLeaf ? 'Create Leaf' : 'Create Category',
+              fields: [
+                { name: 'name', label: 'Name', required: true, value: '' },
+                ...(isLeaf ? [{ name: 'amount', label: 'Initial amount', type: 'number', value: '0.00' }] : []),
+              ],
+              onSubmit: async (values, helpers) => {
+                try {
+                  const payload = {
+                    name: values.name,
+                    project_id: projectNode.id,
+                    budget_id: projectNode.budget_id || fundingState.selectedBudgetId,
+                    parent_id: parentCategory ? parentCategory.id : null,
+                    is_leaf: !!isLeaf,
+                    amount_leaf: isLeaf ? Number(values.amount || 0) : null,
+                    description: null,
+                  };
+                  if (isLeaf && Number.isNaN(payload.amount_leaf)) {
+                    helpers.setError('Amount must be a number.');
+                    return;
+                  }
+                  if (isLeaf && payload.amount_leaf !== null) {
+                    payload.amount_leaf = Math.round(payload.amount_leaf * 100) / 100;
+                  }
+                  await apiCreate('/api/categories', payload);
+                  helpers.close();
+                  showBanner('Category created', 'success');
+                  hideBanner(1500);
+                  await refreshCurrentBudget();
+                } catch (err) {
+                  helpers.setError(err?.message || String(err));
+                }
+              },
+            });
+          }
+
+          function openMoveCategoryModal(category) {
+            let projectNode = getProjectNode(category.project_id || category.item_project_id);
+            if (!projectNode) {
+              projectNode = {
+                id: category.project_id || category.item_project_id,
+                budget_id: fundingState.selectedBudgetId,
+                name: 'Project',
+                children: [],
+              };
+            }
+            const categoryNode = getCategoryNode(category.id) || category;
+            const exclude = new Set();
+            collectDescendantIds(categoryNode, exclude);
+            const options = buildMoveOptions(projectNode, exclude);
+            openFormModal({
+              title: `Move ${category.name}`,
+              submitLabel: 'Move',
+              fields: [
+                {
+                  name: 'target',
+                  label: 'Move to',
+                  type: 'select',
+                  required: true,
+                  options: options.length ? options : [{ value: '', label: 'No available targets' }],
+                  value: options.length ? options[0].value : '',
+                },
+              ],
+              onSubmit: async (values, helpers) => {
+                try {
+                  if (!values.target) {
+                    helpers.setError('Select a target for the move.');
+                    return;
+                  }
+                  const [kind, rawId] = values.target.split(':');
+                  const targetId = kind === 'category' ? Number(rawId) : null;
+                  const query = targetId ? `?new_parent_id=${targetId}` : '';
+                  const check = await api(`/api/categories/${category.id}/can-move${query}`);
+                  if (!check.can_move) {
+                    const reason = check.reason ? check.reason.replace(/_/g, ' ') : 'blocked';
+                    const extra = check.count ? ` (count: ${check.count})` : '';
+                    helpers.setError(`Cannot move: ${reason}${extra}`);
+                    return;
+                  }
+                  await api(`/api/categories/${category.id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ parent_id: targetId }),
+                  });
+                  helpers.close();
+                  showBanner('Category moved', 'success');
+                  hideBanner(1500);
+                  await refreshCurrentBudget();
+                } catch (err) {
+                  helpers.setError(err?.message || String(err));
+                }
+              },
+            });
+          }
+
+          function createField(label, control, { grow = 1 } = {}) {
+            const wrapper = document.createElement('label');
+            wrapper.className = 'budget-field';
+            wrapper.style.setProperty('--grow', String(grow));
+            const title = document.createElement('span');
+            title.className = 'budget-field-label';
+            title.textContent = label;
+            wrapper.append(title, control);
+            return wrapper;
+          }
+
+          function attachEnterCommit(input) {
+            input.addEventListener('keydown', (evt) => {
+              if (evt.key === 'Enter' && !evt.shiftKey) {
+                evt.preventDefault();
+                input.blur();
+              }
+            });
+          }
+
+          function renderBudgetCard(budget, rootNode) {
+            const card = document.createElement('div');
+            card.className = 'ledger-budget-card';
+
+            const row = document.createElement('div');
+            row.className = 'budget-edit-grid';
+
+            const nameInput = document.createElement('input');
+            nameInput.value = budget.name || '';
+            nameInput.placeholder = 'Budget name';
+            attachEnterCommit(nameInput);
+            nameInput.addEventListener('change', async () => {
+              const next = nameInput.value.trim();
+              if (!next || next === budget.name) {
+                nameInput.value = budget.name || '';
+                return;
+              }
+              await saveBudgetPatch(budget.id, { name: next });
+            });
+
+            const ownerInput = document.createElement('input');
+            ownerInput.value = budget.owner || '';
+            ownerInput.placeholder = 'Owner';
+            attachEnterCommit(ownerInput);
+            ownerInput.disabled = !!budget.is_cost_center;
+            ownerInput.addEventListener('change', async () => {
+              const next = ownerInput.value.trim();
+              const normalized = next === '' ? null : next;
+              if ((budget.owner || null) === normalized) return;
+              await saveBudgetPatch(budget.id, { owner: normalized });
+            });
+
+            const costCenterWrap = document.createElement('div');
+            costCenterWrap.className = 'budget-checkbox-wrap';
+            const costCenterInput = document.createElement('input');
+            costCenterInput.type = 'checkbox';
+            costCenterInput.checked = !!budget.is_cost_center;
+            costCenterInput.addEventListener('change', async () => {
+              const next = !!costCenterInput.checked;
+              if (next === !!budget.is_cost_center) return;
+              ownerInput.disabled = next;
+              closureInput.disabled = next;
+              await saveBudgetPatch(budget.id, { is_cost_center: next });
+            });
+            costCenterWrap.appendChild(costCenterInput);
+
+            const closureInput = document.createElement('input');
+            closureInput.type = 'date';
+            const closureValue = budget.closure_date ? String(budget.closure_date).slice(0, 10) : '';
+            closureInput.value = closureValue;
+            closureInput.disabled = !!budget.is_cost_center;
+            closureInput.addEventListener('change', async () => {
+              const next = closureInput.value || null;
+              const current = budget.closure_date ? String(budget.closure_date).slice(0, 10) : null;
+              if (current === (next || null)) return;
+              await saveBudgetPatch(budget.id, { closure_date: next });
+            });
+
+            row.append(
+              createField('Name', nameInput, { grow: 2 }),
+              createField('Owner', ownerInput),
+              createField('Cost Center', costCenterWrap, { grow: 0 }),
+              createField('Closure Date', closureInput),
+            );
+
+            const totalField = document.createElement('div');
+            totalField.className = 'budget-field budget-total-field';
+            const totalLabel = document.createElement('span');
+            totalLabel.className = 'budget-field-label';
+            totalLabel.textContent = 'Budget Total';
+            const totalValue = document.createElement('strong');
+            totalValue.className = 'budget-total-value';
+            totalValue.textContent = fmtCurrency(budget.budget_amount_cache);
+            totalField.append(totalLabel, totalValue);
+            row.appendChild(totalField);
+
+            card.appendChild(row);
+
+            const descRow = document.createElement('div');
+            descRow.className = 'ledger-budget-desc';
+            const tagContainer = document.createElement('div');
+            tagContainer.className = 'budget-tags';
+            attachTagRow(tagContainer, rootNode);
+
+            const descContainer = document.createElement('div');
+            descContainer.className = 'budget-desc-edit';
+            const descLabel = document.createElement('span');
+            descLabel.className = 'budget-field-label';
+            descLabel.textContent = 'Description';
+            const descInput = document.createElement('textarea');
+            descInput.rows = 2;
+            descInput.placeholder = 'Describe this budget…';
+            descInput.value = budget.description || '';
+            descInput.addEventListener('change', async () => {
+              const next = descInput.value.trim();
+              const normalized = next === '' ? null : next;
+              if ((budget.description || null) === normalized) return;
+              await saveBudgetPatch(budget.id, { description: normalized });
+            });
+            descContainer.append(descLabel, descInput);
+
+            descRow.append(tagContainer, descContainer);
+            card.appendChild(descRow);
+
+            const actionsRow = document.createElement('div');
+            actionsRow.className = 'budget-actions';
+            const newItemBtn = document.createElement('button');
+            newItemBtn.type = 'button';
+            newItemBtn.className = 'btn-primary';
+            newItemBtn.textContent = '+ New Item/Project';
+            newItemBtn.addEventListener('click', () => openItemProjectModal(budget));
+            actionsRow.appendChild(newItemBtn);
+            card.appendChild(actionsRow);
+
+            return card;
+          }
+
+          function renderLedger() {
+            ledgerEl.innerHTML = '';
+            const hierarchy = fundingState.currentHierarchy;
+            if (!hierarchy) {
+              ledgerEl.innerHTML = '<div class="funding-empty">Select a funding source to inspect.</div>';
+              return;
+            }
+            const budget = fundingState.budgetMap.get(fundingState.selectedBudgetId);
+            const header = renderBudgetCard(budget, hierarchy);
+            ledgerEl.appendChild(header);
+
+            const body = document.createElement('div');
+            body.className = 'ledger-body';
+            (hierarchy.children || []).forEach(project => {
+              body.appendChild(renderProject(project));
+            });
+            ledgerEl.appendChild(body);
+          }
+
+          function openItemProjectModal(budget) {
+            openFormModal({
+              title: `New Item/Project for ${budget.name}`,
+              submitLabel: 'Create Item/Project',
+              fields: [
+                { name: 'name', label: 'Name', required: true, value: '' },
+                { name: 'assets', label: 'Assets (optional)', type: 'textarea', rows: 3, hint: 'Separate multiple assets with commas or new lines.' },
+              ],
+              onSubmit: async (values, helpers) => {
+                try {
+                  const payload = {
+                    budget_id: budget.id,
+                    name: values.name,
+                    description: null,
+                  };
+                  const created = await apiCreate('/api/item-projects', payload);
+                  const parts = (values.assets || '')
+                    .split(/\r?\n|,/)
+                    .map(part => part.trim())
+                    .filter(Boolean);
+                  for (const piece of parts) {
+                    const asset = await ensureLineAsset(piece);
+                    await attachAssetToProject(created.id, asset.id);
+                  }
+                  helpers.close();
+                  showBanner('Item/Project created', 'success');
+                  hideBanner(1500);
+                  await refreshCurrentBudget();
+                } catch (err) {
+                  helpers.setError(err?.message || String(err));
+                }
+              },
+            });
+          }
+
+          function openAssetModal(project) {
+            openFormModal({
+              title: `Add assets to ${project.name}`,
+              submitLabel: 'Attach Assets',
+              fields: [
+                { name: 'assets', label: 'Asset names', type: 'textarea', rows: 3, required: true, hint: 'Separate multiple assets with commas or new lines.' },
+              ],
+              onSubmit: async (values, helpers) => {
+                try {
+                  const parts = (values.assets || '')
+                    .split(/\r?\n|,/)
+                    .map(part => part.trim())
+                    .filter(Boolean);
+                  if (!parts.length) {
+                    helpers.setError('Provide at least one asset name.');
+                    return;
+                  }
+                  for (const piece of parts) {
+                    const asset = await ensureLineAsset(piece);
+                    await attachAssetToProject(project.id, asset.id);
+                  }
+                  helpers.close();
+                  await refreshCurrentBudget();
+                } catch (err) {
+                  helpers.setError(err?.message || String(err));
+                }
+              },
+            });
+          }
+
+          function renderProject(project) {
+            const key = makeKey(project);
+            const hasChildren = project.children && project.children.length;
+            const expanded = hasChildren ? fundingState.expanded.has(key) : true;
+            const projectNode = getProjectNode(project.id) || project;
+            const wrapper = document.createElement('div');
+            wrapper.className = 'ledger-project';
+
+            const header = document.createElement('div');
+            header.className = 'ledger-row project';
+
+            const collapseBtn = document.createElement('button');
+            collapseBtn.className = 'collapse';
+            collapseBtn.type = 'button';
+            collapseBtn.textContent = hasChildren ? (expanded ? '▾' : '▸') : '';
+            collapseBtn.disabled = !hasChildren;
+
+            const nameCol = document.createElement('div');
+            nameCol.className = 'ledger-col name project-name-col';
+            const nameLabel = document.createElement('span');
+            nameLabel.className = 'project-label';
+            nameLabel.textContent = 'Item/Project';
+            const nameInput = document.createElement('input');
+            nameInput.value = project.name || '';
+            nameInput.placeholder = 'Project name';
+            attachEnterCommit(nameInput);
+            nameInput.addEventListener('change', async () => {
+              const next = nameInput.value.trim();
+              if (!next || next === project.name) {
+                nameInput.value = project.name || '';
+                return;
+              }
+              await saveProjectPatch(project.id, { name: next });
+            });
+            nameCol.append(nameLabel, nameInput);
+
+            const assetsCol = document.createElement('div');
+            assetsCol.className = 'ledger-col assets';
+            const assetList = document.createElement('div');
+            assetList.className = 'asset-chip-row';
+            const assetItems = (project.assets && project.assets.items) ? project.assets.items : [];
+            if (assetItems.length) {
+              assetItems.forEach(asset => {
+                const chip = document.createElement('span');
+                chip.className = 'asset-chip';
+                chip.textContent = asset.name;
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'asset-chip-remove';
+                removeBtn.textContent = '×';
+                removeBtn.title = 'Remove asset';
+                removeBtn.addEventListener('click', async (evt) => {
+                  evt.stopPropagation();
+                  try {
+                    await detachAssetFromProject(project.id, asset.id);
+                    await refreshCurrentBudget();
+                  } catch (err) {
+                    showError(err);
+                  }
+                });
+                chip.appendChild(removeBtn);
+                assetList.appendChild(chip);
+              });
+            } else {
+              const empty = document.createElement('span');
+              empty.className = 'asset-empty';
+              empty.textContent = 'No assets';
+              assetList.appendChild(empty);
+            }
+            const addAssetBtn = document.createElement('button');
+            addAssetBtn.type = 'button';
+            addAssetBtn.className = 'asset-add-btn';
+            addAssetBtn.textContent = '+ Asset';
+            addAssetBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openAssetModal(projectNode);
+            });
+            assetsCol.append(assetList, addAssetBtn);
+
+            const subtotalCol = document.createElement('div');
+            subtotalCol.className = 'ledger-col subtotal';
+            subtotalCol.textContent = `Subtotal: ${fmtCurrency(project.rollup_amount)}`;
+
+            const actionsCol = document.createElement('div');
+            actionsCol.className = 'ledger-actions';
+            const inspectBtn = document.createElement('button');
+            inspectBtn.type = 'button';
+            inspectBtn.textContent = 'Inspect';
+            inspectBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openInspectorFor(project);
+            });
+            actionsCol.appendChild(inspectBtn);
+
+            header.append(collapseBtn, nameCol, assetsCol, subtotalCol, actionsCol);
+            wrapper.appendChild(header);
+
+            const tagRow = document.createElement('div');
+            tagRow.className = 'ledger-tags';
+            attachTagRow(tagRow, project);
+            wrapper.appendChild(tagRow);
+
+            const projectActions = document.createElement('div');
+            projectActions.className = 'project-actions';
+            const addCategoryBtn = document.createElement('button');
+            addCategoryBtn.type = 'button';
+            addCategoryBtn.textContent = '+ Category';
+            addCategoryBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openCategoryModal({ projectNode, parentCategory: null, isLeaf: false });
+            });
+            const addLeafBtn = document.createElement('button');
+            addLeafBtn.type = 'button';
+            addLeafBtn.textContent = '+ Leaf';
+            addLeafBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openCategoryModal({ projectNode, parentCategory: null, isLeaf: true });
+            });
+            projectActions.append(addCategoryBtn, addLeafBtn);
+            wrapper.appendChild(projectActions);
+
+            collapseBtn.addEventListener('click', () => {
+              if (!hasChildren) return;
+              if (expanded) {
+                fundingState.expanded.delete(key);
+              } else {
+                fundingState.expanded.add(key);
+              }
+              persistExpansionState(fundingState.selectedBudgetId);
+              renderLedger();
+            });
+
+            const childrenContainer = document.createElement('div');
+            childrenContainer.className = 'ledger-children';
+            if (!expanded) childrenContainer.style.display = 'none';
+            const categoryChildren = [...(projectNode.children || project.children || [])];
+            categoryChildren.sort((a, b) => {
+              const an = (a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a.name || '');
+              const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
+              return an.localeCompare(bn);
+            });
+            categoryChildren.forEach(child => {
+              childrenContainer.appendChild(renderCategory(child, 0));
+            });
+            wrapper.appendChild(childrenContainer);
+            return wrapper;
+          }
+
+          function renderCategory(category, depth) {
+            const key = makeKey(category);
+            const hasChildren = category.children && category.children.length;
+            const expanded = hasChildren ? fundingState.expanded.has(key) : true;
+            const fragment = document.createDocumentFragment();
+
+            const row = document.createElement('div');
+            row.className = `ledger-row category${category.is_leaf ? ' leaf' : ''}`;
+            row.style.setProperty('--depth', depth);
+
+            const collapseBtn = document.createElement('button');
+            collapseBtn.className = 'collapse';
+            collapseBtn.type = 'button';
+            collapseBtn.textContent = hasChildren ? (expanded ? '▾' : '▸') : '';
+            collapseBtn.disabled = !hasChildren;
+
+            const nameCol = document.createElement('div');
+            nameCol.className = 'ledger-col name category-name-col';
+            const nameInput = document.createElement('input');
+            nameInput.value = category.name || '';
+            nameInput.placeholder = 'Category name';
+            attachEnterCommit(nameInput);
+            nameInput.addEventListener('change', async () => {
+              const next = nameInput.value.trim();
+              if (!next || next === category.name) {
+                nameInput.value = category.name || '';
+                return;
+              }
+              await saveCategoryPatch(category.id, { name: next });
+            });
+            nameCol.appendChild(nameInput);
+
+            const subtotalCol = document.createElement('div');
+            subtotalCol.className = 'ledger-col subtotal category-amount-col';
+            if (category.is_leaf) {
+              const amountWrapper = document.createElement('div');
+              amountWrapper.className = 'category-amount-wrapper';
+              const amountInput = document.createElement('input');
+              amountInput.type = 'number';
+              amountInput.step = '0.01';
+              amountInput.placeholder = 'Amount';
+              const hasValue = category.amount_leaf !== null && category.amount_leaf !== undefined;
+              const parsedAmount = hasValue ? Number(category.amount_leaf) : 0;
+              const safeAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
+              amountInput.value = hasValue ? safeAmount.toFixed(2) : '';
+              attachEnterCommit(amountInput);
+              amountInput.addEventListener('change', async () => {
+                const raw = amountInput.value.trim();
+                let next = null;
+                if (raw !== '') {
+                  const parsed = Number(raw);
+                  if (Number.isNaN(parsed)) {
+                    amountInput.value = safeAmount.toFixed(2);
+                    showBanner('Amount must be numeric', 'warn');
+                    hideBanner(1500);
+                    return;
+                  }
+                  next = Math.round(parsed * 100) / 100;
+                }
+                const current = hasValue
+                  ? Math.round(Number(category.amount_leaf) * 100) / 100
+                  : null;
+                if ((current === null && next === null) || (current !== null && next !== null && Math.abs(current - next) < 0.005)) {
+                  return;
+                }
+                await saveCategoryPatch(category.id, { amount_leaf: next });
+              });
+              amountWrapper.appendChild(amountInput);
+              subtotalCol.appendChild(amountWrapper);
+            } else {
+              subtotalCol.textContent = `Subtotal: ${fmtCurrency(category.rollup_amount)}`;
+            }
+
+            const actionsCol = document.createElement('div');
+            actionsCol.className = 'ledger-actions';
+            const inspectBtn = document.createElement('button');
+            inspectBtn.type = 'button';
+            inspectBtn.textContent = 'Inspect';
+            inspectBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openInspectorFor(category);
+            });
+            actionsCol.appendChild(inspectBtn);
+
+            if (!category.is_leaf) {
+              const addChildBtn = document.createElement('button');
+              addChildBtn.type = 'button';
+              addChildBtn.textContent = '+ Child';
+              addChildBtn.addEventListener('click', (evt) => {
+                evt.stopPropagation();
+                const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
+                  id: category.project_id || category.item_project_id,
+                  budget_id: fundingState.selectedBudgetId,
+                  name: 'Project',
+                };
+                const parentNode = getCategoryNode(category.id) || category;
+                openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: false });
+              });
+              actionsCol.appendChild(addChildBtn);
+
+              const addLeafBtn = document.createElement('button');
+              addLeafBtn.type = 'button';
+              addLeafBtn.textContent = '+ Leaf';
+              addLeafBtn.addEventListener('click', (evt) => {
+                evt.stopPropagation();
+                const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
+                  id: category.project_id || category.item_project_id,
+                  budget_id: fundingState.selectedBudgetId,
+                  name: 'Project',
+                };
+                const parentNode = getCategoryNode(category.id) || category;
+                openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: true });
+              });
+              actionsCol.appendChild(addLeafBtn);
+            }
+
+            const moveBtn = document.createElement('button');
+            moveBtn.type = 'button';
+            moveBtn.textContent = 'Move';
+            moveBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openMoveCategoryModal(getCategoryNode(category.id) || category);
+            });
+            actionsCol.appendChild(moveBtn);
+
+            row.append(collapseBtn, nameCol, subtotalCol, actionsCol);
+            fragment.appendChild(row);
+
+            const tagHolder = document.createElement('div');
+            tagHolder.className = 'ledger-tags';
+            attachTagRow(tagHolder, category);
+            fragment.appendChild(tagHolder);
+
+            collapseBtn.addEventListener('click', () => {
+              if (!hasChildren) return;
+              if (expanded) {
+                fundingState.expanded.delete(key);
+              } else {
+                fundingState.expanded.add(key);
+              }
+              persistExpansionState(fundingState.selectedBudgetId);
+              renderLedger();
+            });
+
+            const childrenContainer = document.createElement('div');
+            childrenContainer.className = 'ledger-children';
+            if (!expanded) childrenContainer.style.display = 'none';
+            const childNodes = [...(category.children || [])];
+            childNodes.sort((a, b) => {
+              const an = (a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a.name || '');
+              const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
+              return an.localeCompare(bn);
+            });
+            childNodes.forEach(child => {
+              childrenContainer.appendChild(renderCategory(child, depth + 1));
+            });
+            if (childNodes.length) {
+              fragment.appendChild(childrenContainer);
+            }
+
+            return fragment;
+          }
+
+          function closeInspector() {
+            fundingState.inspector = { open: false, entity: null };
+            inspectorEl.classList.add('hidden');
+            inspectorEl.innerHTML = '';
+          }
+
+          async function refreshCurrentBudget() {
+            closeInspector();
+            fundingState.lineAssetCache.clear();
+            await loadBudgetTree(fundingState.selectedBudgetId);
+            await loadBudgets(fundingState.searchTerm);
+            renderBudgetList();
+          }
+
+          fundingState.refreshCurrentBudget = refreshCurrentBudget;
+
+          let searchTimer = null;
+          searchInput.addEventListener('input', () => {
+            const term = searchInput.value.trim();
+            if (searchTimer) clearTimeout(searchTimer);
+            searchTimer = setTimeout(async () => {
+              await loadBudgets(term);
+              renderBudgetList();
+              if (!fundingState.budgetMap.has(fundingState.selectedBudgetId)) {
+                fundingState.selectedBudgetId = null;
+                ledgerEl.innerHTML = '<div class="funding-empty">Select a funding source to inspect.</div>';
+              }
+            }, 220);
+          });
+
+          if (newBudgetBtn) newBudgetBtn.onclick = () => openBudgetModal();
+
+          if (tagManagerBtn) tagManagerBtn.onclick = () => {
+            const navBtn = document.querySelector('nav button[data-tab="tags"]');
+            if (navBtn) {
+              navBtn.click();
+            }
           };
 
-          content.innerHTML =
-            card('Add Category (n-level)', `
-              <div class="row">
-                ${field('name', labelFor('name','Name', 'E.g., "Parts" → "Long Lead".'), input('name','Parts / Long Lead'))}
-                ${field('parent_id', labelFor('parent_id','Parent', 'Choose a parent to nest; else root.'), select('parent_id', catOpts, { ...categoryHandlers, allowCreate: false, allowDelete: false }))}
-                ${field('project_id', labelFor('project_id','Scope (Project)','Blank = global tree; otherwise project-scoped.'), select('project_id', projOpts, { ...projectHandlers, allowCreate: false }))}
-                <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
+          if (rebuildBtn) rebuildBtn.onclick = () => enqueueScopedRebuild(null, 'UI');
+
+          function openBudgetModal() {
+            openFormModal({
+              title: 'New Budget',
+              submitLabel: 'Create Budget',
+              fields: [
+                { name: 'name', label: 'Name', required: true, value: '' },
+                { name: 'owner', label: 'Owner', value: '' },
+                { name: 'is_cost_center', label: 'Cost Center?', type: 'checkbox', value: false },
+                { name: 'closure_date', label: 'Closure Date', type: 'date', value: '' },
+                { name: 'description', label: 'Description', type: 'textarea', rows: 3, value: '' },
+              ],
+              onSubmit: async (values, helpers) => {
+                try {
+                  const payload = {
+                    name: values.name,
+                    owner: values.owner || null,
+                    is_cost_center: !!values.is_cost_center,
+                    closure_date: values.closure_date || null,
+                    description: values.description || null,
+                  };
+                  const created = await apiCreate('/api/budgets', payload);
+                  helpers.close();
+                  showBanner('Budget created', 'success');
+                  fundingState.searchTerm = '';
+                  if (searchInput) searchInput.value = '';
+                  await loadBudgets('');
+                  renderBudgetList();
+                  await selectBudget(created.id);
+                } catch (err) {
+                  helpers.setError(err?.message || String(err));
+                }
+              },
+            });
+          }
+
+          async function selectBudget(budgetId) {
+            if (fundingState.selectedBudgetId === budgetId) return;
+            fundingState.selectedBudgetId = budgetId;
+            renderBudgetList();
+            await loadBudgetTree(budgetId);
+          }
+
+          try {
+            await loadBudgets('');
+            renderBudgetList();
+            if (fundingState.budgets.length) {
+              await selectBudget(fundingState.budgets[0].id);
+            }
+          } catch (err) {
+            showError(err);
+          }
+
+          function openInspectorFor(node) {
+            fundingState.currentHierarchy && closeInspector();
+            openInspectorDrawer(node);
+          }
+
+          function openInspectorDrawer(node) {
+            fundingState.inspector = { open: true, entity: node };
+            inspectorEl.classList.remove('hidden');
+            inspectorEl.innerHTML = '';
+            const panel = document.createElement('div');
+            panel.className = 'drawer-panel inspector-panel';
+            const scopeName = TAG_SCOPE_TYPES[toScopeType(node.type)] || node.type;
+            panel.innerHTML = `
+              <div class="drawer-header">
+                <div>
+                  <h3>${escapeHtml(scopeName)}</h3>
+                  <div class="inspector-sub">${escapeHtml(node.name || '')}</div>
+                </div>
+                <button type="button" class="close-inspector">×</button>
               </div>
-            `)
-            + card('All Categories', table(categories, [
-              { key: 'id', label: 'ID' },
-              { key: 'name', label: 'Category Name' },
-              { key: 'parent_id', label: 'Parent Category' },
-              { key: 'project_id', label: 'Project Scope' },
-            ], '/api/categories'));
-
-          initializeDropdowns(content);
-          setupTableEditing(content, '/api/categories', categories, {
-            parent_id: {
-              type: 'dropdown',
-              getOptions: (row) => parentOptions.filter(opt => opt.value !== row.id),
-              handlers: categoryHandlers,
-              valueType: 'number',
-              allowNull: true,
-              nullOptionLabel: '(No parent)',
-            },
-            project_id: {
-              type: 'dropdown',
-              options: projectOptions,
-              handlers: projectHandlers,
-              valueType: 'number',
-              allowNull: true,
-              nullOptionLabel: '(Global)',
-            },
-          });
-  
-          const add = document.getElementById('add');
-          if (add) add.onclick = async ()=>{
-            const name = content.querySelector('input[name=name]').value;
-            const parentRaw = content.querySelector('select[name=parent_id]').value;
-            const projectRaw = content.querySelector('select[name=project_id]').value;
-            const body = {
-              name,
-              parent_id: parentRaw ? Number(parentRaw) : null,
-              project_id: projectRaw ? Number(projectRaw) : null
-            };
-            if(!name) return alert('Name required');
-            await apiCreate('/api/categories', body);
-            renderCategories();
-          };
+              <div class="inspector-section">
+                <div class="inspector-meta"><strong>ID:</strong> ${node.id}</div>
+                ${node.path_names ? `<div class="inspector-meta"><strong>Path:</strong> ${node.path_names.join(' / ')}</div>` : ''}
+                <div class="inspector-meta"><strong>Amount:</strong> ${fmtCurrency(node.amount_leaf || node.rollup_amount)}</div>
+              </div>
+              <div class="inspector-section inspector-tags-block">
+                <div class="inspector-tags" data-kind="direct"></div>
+                <div class="inspector-tags" data-kind="inherited"></div>
+                <div class="inspector-tags" data-kind="effective"></div>
+              </div>
+              <div class="inspector-actions">
+                <button type="button" class="rebuild-scope">Rebuild tags for this scope</button>
+              </div>`;
+            inspectorEl.appendChild(panel);
+            panel.querySelector('.close-inspector').onclick = closeInspector;
+            panel.querySelector('.rebuild-scope').onclick = () => enqueueScopedRebuild({ entity_type: toScopeType(node.type), entity_id: node.id }, 'Inspector');
+            const bundles = node.tags || { direct: [], inherited: [], effective: [] };
+            const directBox = panel.querySelector('[data-kind="direct"]');
+            const inheritedBox = panel.querySelector('[data-kind="inherited"]');
+            const effectiveBox = panel.querySelector('[data-kind="effective"]');
+            directBox.innerHTML = '<div class="inspector-title">Direct</div>';
+            (bundles.direct || []).forEach(tag => {
+              const chip = createTagChip(tag, {
+                inherited: false,
+                onEdit: (t, anchor) => openTagEditor(anchor, t, {
+                  onSaved: refreshCurrentBudget,
+                }),
+                onRemove: async (tagToRemove) => {
+                  await api('/api/tags/assign', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tag_id: tagToRemove.id, entity_type: toScopeType(node.type), entity_id: node.id, actor: 'UI' }),
+                  });
+                  await refreshCurrentBudget();
+                  enqueueScopedRebuild({ entity_type: toScopeType(node.type), entity_id: node.id }, 'Inspector');
+                },
+              });
+              directBox.appendChild(chip);
+            });
+            inheritedBox.innerHTML = '<div class="inspector-title">Inherited</div>';
+            (bundles.inherited || []).forEach(tag => {
+              const chip = createTagChip(tag, {
+                inherited: true,
+                onEdit: (t, anchor) => openTagEditor(anchor, t, {
+                  onSaved: refreshCurrentBudget,
+                }),
+              });
+              inheritedBox.appendChild(chip);
+            });
+            effectiveBox.innerHTML = '<div class="inspector-title">Effective</div>';
+            (bundles.effective || []).forEach(tag => {
+              const chip = createTagChip(tag, {
+                inherited: true,
+                onEdit: (t, anchor) => openTagEditor(anchor, t, {
+                  onSaved: refreshCurrentBudget,
+                }),
+              });
+              effectiveBox.appendChild(chip);
+            });
+          }
         }
   
         async function renderVendors(){
@@ -2414,24 +4109,185 @@
         }
   
         async function renderTags(){
-          const tags = await apiList('/api/tags');
-          content.innerHTML =
-            card('Add Tag', `
-              <div class="row">
-                ${field('name', labelFor('name','Tag','Freeform label to group entries for ad-hoc reporting.'), input('name','long-lead'))}
-                <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
-              </div>`)
-            + card('All Tags', table(tags, [
-              { key: 'id', label: 'ID' },
-              { key: 'name', label: 'Tag Name' },
-            ], '/api/tags'));
-          const add = document.getElementById('add');
-          if (add) add.onclick = async ()=>{
-            const name = content.querySelector('input[name=name]').value;
-            if(!name) return alert('Tag required');
-            await apiCreate('/api/tags', {name});
-            renderTags();
+          content.innerHTML = `
+            <div class="tag-manager">
+              <div class="tag-manager-header">
+                <h2>Tag Manager</h2>
+                <div class="tag-manager-actions">
+                  <button id="tagNewButton">New Tag</button>
+                  <button id="tagRebuildAll">Rebuild Effective Tags</button>
+                </div>
+              </div>
+              <div class="tag-manager-search">
+                <input id="tagSearch" class="input" placeholder="Search tags…" autocomplete="off" />
+              </div>
+              <div id="tagTable" class="tag-manager-table"></div>
+            </div>`;
+
+          const tableEl = content.querySelector('#tagTable');
+          const searchEl = content.querySelector('#tagSearch');
+          const newBtn = content.querySelector('#tagNewButton');
+          const rebuildBtn = content.querySelector('#tagRebuildAll');
+
+          let tags = [];
+          let usage = [];
+          let filtered = [];
+
+          async function loadTags() {
+            tags = await api('/api/tags?includeDeprecated=true');
+            usage = await api('/api/tags/usage');
+            filtered = tags.slice();
+            renderTable();
+          }
+
+          function usageFor(tagId) {
+            const entry = usage.find(item => item.tag.id === tagId);
+            return entry ? entry.assignments : { budget: 0, project: 0, category: 0, entry: 0, line_asset: 0 };
+          }
+
+          function renderTable() {
+            if (!filtered.length) {
+              tableEl.innerHTML = '<div class="tag-empty">No tags found.</div>';
+              return;
+            }
+            const table = document.createElement('table');
+            table.className = 'tag-table';
+            table.innerHTML = `
+              <thead>
+                <tr>
+                  <th>Tag</th>
+                  <th>Description</th>
+                  <th>Deprecated</th>
+                  <th>Usage</th>
+                  <th style="width:140px">Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>`;
+            const tbody = table.querySelector('tbody');
+            filtered.forEach(tag => {
+              const assignments = usageFor(tag.id);
+              const row = document.createElement('tr');
+              row.innerHTML = `
+                <td>
+                  <div class="tag-cell">
+                    <span class="tag-swatch" style="background:${tag.color || '#4b5771'}"></span>
+                    <span class="tag-name">#${escapeHtml(tag.name)}</span>
+                  </div>
+                </td>
+                <td>${escapeHtml(tag.description || '')}</td>
+                <td>${tag.is_deprecated ? 'Yes' : 'No'}</td>
+                <td>
+                  <div class="tag-usage">${['budget','project','category','entry','line_asset'].map(key => `<span>${key}:${assignments[key] || 0}</span>`).join(' ')}</div>
+                </td>
+                <td class="tag-actions"></td>`;
+              const actionsCell = row.querySelector('.tag-actions');
+              const editBtn = document.createElement('button');
+              editBtn.textContent = 'Edit';
+              editBtn.addEventListener('click', () => {
+                openTagEditor(editBtn, tag, {
+                  onSaved: async () => {
+                    await loadTags();
+                    if (typeof fundingState.refreshCurrentBudget === 'function') await fundingState.refreshCurrentBudget();
+                  },
+                });
+              });
+              const mergeBtn = document.createElement('button');
+              mergeBtn.textContent = 'Merge';
+              mergeBtn.addEventListener('click', async () => {
+                const targetName = prompt('Merge into which tag? Enter name (without #)');
+                if (!targetName) return;
+                const target = tags.find(t => t.name.toLowerCase() === targetName.trim().toLowerCase() && t.id !== tag.id);
+                if (!target) return alert('Tag not found.');
+                if (!confirm(`Merge #${tag.name} into #${target.name}?`)) return;
+                try {
+                  await api(`/api/tags/${tag.id}/merge-into/${target.id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ actor: 'UI' }),
+                  });
+                  fundingState.tagCache.clear();
+                  await loadTags();
+                  if (typeof fundingState.refreshCurrentBudget === 'function') await fundingState.refreshCurrentBudget();
+                } catch (err) {
+                  showError(err);
+                }
+              });
+              const deprecateBtn = document.createElement('button');
+              deprecateBtn.textContent = tag.is_deprecated ? 'Undeprecate' : 'Deprecate';
+              deprecateBtn.addEventListener('click', async () => {
+                try {
+                  await api(`/api/tags/${tag.id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ is_deprecated: !tag.is_deprecated, actor: 'UI' }),
+                  });
+                  await loadTags();
+                  if (typeof fundingState.refreshCurrentBudget === 'function') await fundingState.refreshCurrentBudget();
+                } catch (err) {
+                  showError(err);
+                }
+              });
+              const deleteBtn = document.createElement('button');
+              deleteBtn.textContent = 'Delete';
+              const totalUsage = Object.values(assignments).reduce((a, b) => a + (b || 0), 0);
+              if (totalUsage > 0) {
+                deleteBtn.disabled = true;
+                deleteBtn.title = 'Cannot delete tag with assignments';
+              }
+              deleteBtn.addEventListener('click', async () => {
+                if (totalUsage > 0) return;
+                if (!confirm(`Delete tag #${tag.name}?`)) return;
+                try {
+                  await api(`/api/tags/${tag.id}`, { method: 'DELETE' });
+                  fundingState.tagCache.clear();
+                  await loadTags();
+                  if (typeof fundingState.refreshCurrentBudget === 'function') await fundingState.refreshCurrentBudget();
+                } catch (err) {
+                  showError(err);
+                }
+              });
+              actionsCell.append(editBtn, mergeBtn, deprecateBtn, deleteBtn);
+              tbody.appendChild(row);
+            });
+            tableEl.innerHTML = '';
+            tableEl.appendChild(table);
+          }
+
+          if (newBtn) newBtn.onclick = () => {
+            const name = prompt('New tag name (lowercase, no spaces)');
+            if (!name) return;
+            const clean = name.trim().toLowerCase();
+            if (!clean.match(/^[a-z0-9_.:-]+$/)) {
+              alert('Tag names must be lowercase alphanumerics or - _ . :');
+              return;
+            }
+            api('/api/tags', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: clean, color: randomTagColor(), actor: 'UI' }),
+            }).then(async () => {
+              fundingState.tagCache.clear();
+              await loadTags();
+            }).catch(showError);
           };
+
+          if (rebuildBtn) rebuildBtn.onclick = () => enqueueScopedRebuild(null, 'Tag Manager');
+
+          let searchTimer = null;
+          searchEl.addEventListener('input', () => {
+            const term = searchEl.value.trim().toLowerCase();
+            if (searchTimer) clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+              filtered = tags.filter(tag => tag.name.toLowerCase().includes(term) || (tag.description || '').toLowerCase().includes(term));
+              renderTable();
+            }, 180);
+          });
+
+          try {
+            await loadTags();
+          } catch (err) {
+            showError(err);
+          }
         }
   
         // ---- Router ----
@@ -2440,9 +4296,6 @@
           const tab = active && active.dataset.tab;
           try {
             if(tab==='portfolios') return renderPortfolios();
-            if(tab==='project_groups') return renderProjectGroups();
-            if(tab==='projects') return renderProjects();
-            if(tab==='categories') return renderCategories();
             if(tab==='vendors') return renderVendors();
             if(tab==='entries') return renderEntries();
             if(tab==='pivots') return renderPivots();
@@ -2454,10 +4307,11 @@
             content.innerHTML = card('Welcome','Pick a tab above to get started.');
           } catch (e) { showError(e); }
         }
-  
+
         nav.addEventListener('click', (e)=>{
           const btn = e.target.closest('button[data-tab]');
           if (!btn) return;
+          const tab = btn.dataset.tab;
           document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
           btn.classList.add('active');
           renderActive();
