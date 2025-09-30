@@ -176,6 +176,19 @@ button[disabled] { opacity:.6; cursor:not-allowed; }
 .ledger-inline.inline-checkbox { gap:8px; }
 .ledger-inline.inline-checkbox input { width:16px; height:16px; }
 
+.ledger-tree-host {
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  padding:8px 12px 32px;
+  width:100%;
+  box-sizing:border-box;
+  background: var(--card);
+  border:1px solid var(--border);
+  border-radius:12px;
+  --tv-surface: var(--card);
+}
+
 .ledger-body { display:flex; flex-direction:column; gap:10px; padding-bottom:36px; }
 .ledger-project { border:1px solid var(--border); border-radius:12px; background:#11151f; overflow:hidden; position:relative; }
 .ledger-project + .ledger-project { margin-top:4px; }

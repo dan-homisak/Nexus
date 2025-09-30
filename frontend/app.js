@@ -1953,7 +1953,13 @@
               if (node.type === 'category') {
                 if (node.parent_id) {
                   const parent = categoryMap.get(node.parent_id);
-                  if (parent) parent.children.push(node);
+                  if (parent) {
+                    parent.children.push(node);
+                    parent.is_leaf = false;
+                  } else {
+                    const fallbackProject = projectMap.get(node.project_id || node.item_project_id);
+                    if (fallbackProject) fallbackProject.children.push(node);
+                  }
                 } else {
                   const parentProject = projectMap.get(node.project_id || node.item_project_id);
                   if (parentProject) parentProject.children.push(node);
@@ -2581,10 +2587,375 @@
 
             const body = document.createElement('div');
             body.className = 'ledger-body';
-            (hierarchy.children || []).forEach(project => {
-              body.appendChild(renderProject(project));
-            });
+
+            const treeHolder = document.createElement('div');
+            treeHolder.className = 'ledger-tree-host';
+
+            const treeEl = document.createElement('ul');
+            treeEl.id = 'tree';
+            treeEl.className = 'tv';
+            treeEl.setAttribute('role', 'tree');
+            treeEl.setAttribute('aria-label', 'Budget items');
+
+            treeHolder.appendChild(treeEl);
+            body.appendChild(treeHolder);
             ledgerEl.appendChild(body);
+
+            if (!window.TreeView || typeof window.TreeView.renderTree !== 'function') {
+              treeEl.innerHTML = '<li>TreeView component missing.</li>';
+              return;
+            }
+
+            const nodes = buildTreeNodes(hierarchy.children || []);
+            window.TreeView.renderTree(treeEl, nodes, {
+              getExpanded: (node) => (node && node.children && node.children.length)
+                ? fundingState.expanded.has(node.key)
+                : false,
+              setExpanded: (node, expand) => {
+                if (!node || !node.children || !node.children.length) return;
+                if (expand) {
+                  fundingState.expanded.add(node.key);
+                } else {
+                  fundingState.expanded.delete(node.key);
+                }
+                persistExpansionState(fundingState.selectedBudgetId);
+              },
+              decorateRow: decorateTreeRow,
+            });
+          }
+
+          function buildTreeNodes(projects = []) {
+            return sortChildren(projects).map(project => toTreeNode(project)).filter(Boolean);
+          }
+
+          function toTreeNode(entity) {
+            if (!entity) return null;
+            const key = makeKey(entity);
+            const children = (entity.children && entity.children.length)
+              ? sortChildren(entity.children).map(child => toTreeNode(child)).filter(Boolean)
+              : [];
+            const hasChildren = children.length > 0;
+            const node = {
+              key,
+              type: entity.type,
+              label: entity.name || '',
+              isLeaf: entity.type === 'category' ? (!!entity.is_leaf && !hasChildren) : false,
+              data: entity,
+            };
+            if (children.length) node.children = children;
+            return node;
+          }
+
+          function sortChildren(list) {
+            return [...list].sort((a, b) => {
+              const an = (a && a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a && a.name ? a.name : '');
+              const bn = (b && b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b && b.name ? b.name : '');
+              return an.localeCompare(bn);
+            });
+          }
+
+          function decorateTreeRow(ctx) {
+            if (!ctx || !ctx.node) return;
+            const { node, row, main, end } = ctx;
+            row.dataset.type = node.type || '';
+            row.dataset.leaf = String(node.type === 'category' && node.data && node.data.is_leaf);
+            main.innerHTML = '';
+            end.innerHTML = '';
+
+            if (node.type === 'project') {
+              renderTreeProjectRow(ctx);
+            } else if (node.type === 'category') {
+              renderTreeCategoryRow(ctx);
+            } else {
+              const title = document.createElement('span');
+              title.className = 'tv__title';
+              title.textContent = node.label || '';
+              main.appendChild(title);
+            }
+          }
+
+          function renderTreeProjectRow(ctx) {
+            const { node, main, end, toggle } = ctx;
+            const project = node.data;
+            const projectNode = getProjectNode(project.id) || project;
+
+            main.classList.add('tv__mainStack');
+
+            end.classList.add('ledger-actions');
+            end.dataset.tvStopToggle = '1';
+            end.dataset.tvStopNav = '1';
+
+            toggle.setAttribute('aria-label', node.children && node.children.length ? 'Toggle project' : 'No children');
+
+            const topLine = document.createElement('div');
+            topLine.className = 'tv__line';
+            main.appendChild(topLine);
+
+            const nameInput = document.createElement('textarea');
+            nameInput.rows = 1;
+            nameInput.value = project.name || '';
+            nameInput.placeholder = 'Project name';
+            nameInput.dataset.tvStopToggle = '1';
+            nameInput.dataset.tvStopNav = '1';
+            attachEnterCommit(nameInput);
+            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 280, minHeight: 32 });
+            nameInput.addEventListener('change', async () => {
+              const next = nameInput.value.trim();
+              if (!next || next === project.name) {
+                nameInput.value = project.name || '';
+                triggerAutoGrow(nameInput);
+                return;
+              }
+              await saveProjectPatch(project.id, { name: next });
+              triggerAutoGrow(nameInput);
+            });
+            const nameField = makeInlineField('Item/Project', nameInput);
+            topLine.appendChild(nameField);
+            requestAnimationFrame(() => triggerAutoGrow(nameInput));
+
+            const subtotal = document.createElement('span');
+            subtotal.className = 'tv__meta';
+            subtotal.textContent = `Subtotal: ${fmtCurrency(project.rollup_amount || 0)}`;
+            topLine.appendChild(subtotal);
+
+            const tagBox = document.createElement('div');
+            tagBox.className = 'tv__tagRegion';
+            tagBox.dataset.tvStopToggle = '1';
+            tagBox.dataset.tvStopNav = '1';
+            attachTagRow(tagBox, projectNode, { showLabel: false });
+            main.appendChild(tagBox);
+
+            const assetRow = document.createElement('div');
+            assetRow.className = 'tv__assetScroll';
+            assetRow.dataset.tvStopToggle = '1';
+            assetRow.dataset.tvStopNav = '1';
+            const assetLabel = document.createElement('span');
+            assetLabel.className = 'tv__meta';
+            assetLabel.textContent = 'Assets:';
+            assetRow.appendChild(assetLabel);
+
+            const assetList = document.createElement('div');
+            assetList.className = 'asset-chip-row';
+            assetRow.appendChild(assetList);
+
+            const assetItems = (project.assets && project.assets.items) ? project.assets.items : [];
+            if (assetItems.length) {
+              assetItems.forEach(asset => {
+                const chip = document.createElement('span');
+                chip.className = 'asset-chip';
+                chip.textContent = asset.name;
+                chip.dataset.tvStopToggle = '1';
+                chip.dataset.tvStopNav = '1';
+
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'asset-chip-remove';
+                removeBtn.textContent = '×';
+                removeBtn.title = 'Remove asset';
+                removeBtn.dataset.tvStopToggle = '1';
+                removeBtn.dataset.tvStopNav = '1';
+                removeBtn.addEventListener('click', async (evt) => {
+                  evt.stopPropagation();
+                  try {
+                    await detachAssetFromProject(project.id, asset.id);
+                    await refreshCurrentBudget();
+                  } catch (err) {
+                    showError(err);
+                  }
+                });
+                chip.appendChild(removeBtn);
+                assetList.appendChild(chip);
+              });
+            } else {
+              const empty = document.createElement('span');
+              empty.className = 'asset-empty';
+              empty.textContent = 'None';
+              empty.dataset.tvStopToggle = '1';
+              assetList.appendChild(empty);
+            }
+
+            const addAssetBtn = document.createElement('button');
+            addAssetBtn.type = 'button';
+            addAssetBtn.className = 'asset-add-btn';
+            addAssetBtn.textContent = '+ Asset';
+            addAssetBtn.dataset.tvStopToggle = '1';
+            addAssetBtn.dataset.tvStopNav = '1';
+            addAssetBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openAssetModal(projectNode);
+            });
+            assetRow.appendChild(addAssetBtn);
+            main.appendChild(assetRow);
+
+            const groupBtn = document.createElement('button');
+            groupBtn.type = 'button';
+            groupBtn.textContent = '+ Group';
+            groupBtn.dataset.tvStopToggle = '1';
+            groupBtn.dataset.tvStopNav = '1';
+            groupBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openCategoryModal({ projectNode, parentCategory: null, isLeaf: false });
+            });
+            end.appendChild(groupBtn);
+
+            const leafBtn = document.createElement('button');
+            leafBtn.type = 'button';
+            leafBtn.textContent = '+ Leaf';
+            leafBtn.dataset.tvStopToggle = '1';
+            leafBtn.dataset.tvStopNav = '1';
+            leafBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openCategoryModal({ projectNode, parentCategory: null, isLeaf: true });
+            });
+            end.appendChild(leafBtn);
+
+            const inspectBtn = document.createElement('button');
+            inspectBtn.type = 'button';
+            inspectBtn.className = 'icon-btn';
+            inspectBtn.textContent = 'ℹ';
+            inspectBtn.dataset.tvStopToggle = '1';
+            inspectBtn.dataset.tvStopNav = '1';
+            inspectBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openInspectorFor(project);
+            });
+            end.appendChild(inspectBtn);
+          }
+
+          function renderTreeCategoryRow(ctx) {
+            const { node, main, end } = ctx;
+            const category = node.data;
+            const isLeaf = node.isLeaf === true;
+
+            main.classList.add('tv__mainStack');
+
+            const line = document.createElement('div');
+            line.className = 'tv__line';
+            main.appendChild(line);
+
+            const nameInput = document.createElement('textarea');
+            nameInput.rows = 1;
+            nameInput.value = category.name || '';
+            nameInput.placeholder = 'Category name';
+            nameInput.dataset.tvStopToggle = '1';
+            nameInput.dataset.tvStopNav = '1';
+            attachEnterCommit(nameInput);
+            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 220, minHeight: 32 });
+            nameInput.addEventListener('change', async () => {
+              const next = nameInput.value.trim();
+              if (!next || next === category.name) {
+                nameInput.value = category.name || '';
+                triggerAutoGrow(nameInput);
+                return;
+              }
+              await saveCategoryPatch(category.id, { name: next });
+              triggerAutoGrow(nameInput);
+            });
+            const labelText = isLeaf ? 'Leaf' : 'Group';
+            const nameField = makeInlineField(labelText, nameInput);
+            line.appendChild(nameField);
+            requestAnimationFrame(() => triggerAutoGrow(nameInput));
+
+            if (isLeaf) {
+              const amountInput = document.createElement('input');
+              amountInput.type = 'number';
+              amountInput.step = '0.01';
+              amountInput.inputMode = 'decimal';
+              const hasValue = category.amount_leaf !== null && category.amount_leaf !== undefined;
+              amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
+              amountInput.placeholder = '0.00';
+              amountInput.dataset.tvStopToggle = '1';
+              amountInput.dataset.tvStopNav = '1';
+              amountInput.addEventListener('change', async () => {
+                const raw = amountInput.value.trim();
+                let next = null;
+                if (raw !== '') {
+                  const parsed = Number(raw);
+                  if (Number.isNaN(parsed)) {
+                    amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
+                    showBanner('Amount must be numeric', 'warn');
+                    hideBanner(1600);
+                    return;
+                  }
+                  next = Math.round(parsed * 100) / 100;
+                }
+                await saveCategoryPatch(category.id, { amount_leaf: next });
+              });
+              const amountField = makeInlineField('Amount', amountInput);
+              line.appendChild(amountField);
+            } else {
+              const subtotal = document.createElement('span');
+              subtotal.className = 'tv__meta';
+              subtotal.textContent = `Subtotal: ${fmtCurrency(category.rollup_amount || 0)}`;
+              line.appendChild(subtotal);
+            }
+
+            const tagBox = document.createElement('div');
+            tagBox.className = 'tv__tagRegion';
+            tagBox.dataset.tvStopToggle = '1';
+            tagBox.dataset.tvStopNav = '1';
+            attachTagRow(tagBox, category, { showLabel: false });
+            main.appendChild(tagBox);
+
+            const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
+              id: category.project_id || category.item_project_id,
+              budget_id: fundingState.selectedBudgetId,
+              name: 'Project',
+            };
+            const categoryNode = getCategoryNode(category.id) || category;
+
+            end.classList.add('ledger-actions');
+            end.dataset.tvStopToggle = '1';
+            end.dataset.tvStopNav = '1';
+
+            const groupBtn = document.createElement('button');
+            groupBtn.type = 'button';
+            groupBtn.textContent = '+ Group';
+            groupBtn.disabled = isLeaf;
+            groupBtn.dataset.tvStopToggle = '1';
+            groupBtn.dataset.tvStopNav = '1';
+            groupBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              if (isLeaf) return;
+              openCategoryModal({ projectNode, parentCategory: categoryNode, isLeaf: false });
+            });
+            end.appendChild(groupBtn);
+
+            const leafBtn = document.createElement('button');
+            leafBtn.type = 'button';
+            leafBtn.textContent = '+ Leaf';
+            leafBtn.disabled = isLeaf;
+            leafBtn.dataset.tvStopToggle = '1';
+            leafBtn.dataset.tvStopNav = '1';
+            leafBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              if (isLeaf) return;
+              openCategoryModal({ projectNode, parentCategory: categoryNode, isLeaf: true });
+            });
+            end.appendChild(leafBtn);
+
+            const moveBtn = document.createElement('button');
+            moveBtn.type = 'button';
+            moveBtn.textContent = 'Move';
+            moveBtn.dataset.tvStopToggle = '1';
+            moveBtn.dataset.tvStopNav = '1';
+            moveBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openMoveCategoryModal(categoryNode);
+            });
+            end.appendChild(moveBtn);
+
+            const inspectBtn = document.createElement('button');
+            inspectBtn.type = 'button';
+            inspectBtn.className = 'icon-btn';
+            inspectBtn.textContent = 'ℹ';
+            inspectBtn.dataset.tvStopToggle = '1';
+            inspectBtn.dataset.tvStopNav = '1';
+            inspectBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openInspectorFor(category);
+            });
+            end.appendChild(inspectBtn);
           }
 
           function openItemProjectModal(budget) {
@@ -2650,367 +3021,6 @@
                 }
               },
             });
-          }
-
-          function renderProject(project) {
-            const projectNode = getProjectNode(project.id) || project;
-            const key = makeKey(project);
-            const hasChildren = (projectNode.children && projectNode.children.length) || (project.children && project.children.length);
-            const expanded = hasChildren ? fundingState.expanded.has(key) : true;
-
-            const wrapper = document.createElement('div');
-            wrapper.className = 'ledger-project';
-
-            const header = document.createElement('div');
-            header.className = 'ledger-section-header';
-
-            const line = document.createElement('div');
-            line.className = 'ledger-header-line';
-
-            const nameInput = document.createElement('textarea');
-            nameInput.rows = 1;
-            nameInput.value = project.name || '';
-            nameInput.placeholder = 'Project name';
-            attachEnterCommit(nameInput);
-            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 320, minHeight: 32 });
-            nameInput.addEventListener('change', async () => {
-              const next = nameInput.value.trim();
-              if (!next || next === project.name) {
-                nameInput.value = project.name || '';
-                triggerAutoGrow(nameInput);
-                return;
-              }
-              await saveProjectPatch(project.id, { name: next });
-              triggerAutoGrow(nameInput);
-            });
-            line.appendChild(makeInlineField('Item/Project', nameInput));
-            requestAnimationFrame(() => triggerAutoGrow(nameInput));
-
-            const tagInline = document.createElement('div');
-            tagInline.className = 'ledger-inline ledger-inline-tags';
-            attachTagRow(tagInline, project, { showLabel: false });
-            line.appendChild(tagInline);
-
-            const subtotal = document.createElement('span');
-            subtotal.className = 'amount';
-            subtotal.textContent = `Subtotal: ${fmtCurrency(project.rollup_amount || 0)}`;
-            line.appendChild(subtotal);
-
-            const headerActions = document.createElement('div');
-            headerActions.className = 'ledger-actions';
-
-            const toggleBtn = document.createElement('button');
-            toggleBtn.type = 'button';
-            toggleBtn.className = 'icon-btn';
-            toggleBtn.textContent = expanded ? '▾' : '▸';
-            toggleBtn.disabled = !hasChildren;
-            toggleBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              if (!hasChildren) return;
-              if (expanded) {
-                fundingState.expanded.delete(key);
-              } else {
-                fundingState.expanded.add(key);
-              }
-              persistExpansionState(fundingState.selectedBudgetId);
-              renderLedger();
-            });
-            headerActions.appendChild(toggleBtn);
-
-            const groupBtn = document.createElement('button');
-            groupBtn.type = 'button';
-            groupBtn.textContent = '+ Group';
-            groupBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: null, isLeaf: false });
-            });
-            headerActions.appendChild(groupBtn);
-
-            const leafBtn = document.createElement('button');
-            leafBtn.type = 'button';
-            leafBtn.textContent = '+ Leaf';
-            leafBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: null, isLeaf: true });
-            });
-            headerActions.appendChild(leafBtn);
-
-            const inspectBtn = document.createElement('button');
-            inspectBtn.type = 'button';
-            inspectBtn.className = 'icon-btn';
-            inspectBtn.textContent = 'ℹ';
-            inspectBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openInspectorFor(project);
-            });
-            headerActions.appendChild(inspectBtn);
-
-            line.appendChild(headerActions);
-            header.appendChild(line);
-
-            const assetsLine = document.createElement('div');
-            assetsLine.className = 'ledger-tag-line';
-            const assetsLabel = document.createElement('span');
-            assetsLabel.className = 'tag-line-label';
-            assetsLabel.textContent = 'Assets:';
-            assetsLine.appendChild(assetsLabel);
-
-            const assetList = document.createElement('div');
-            assetList.className = 'asset-chip-row';
-            const assetItems = (project.assets && project.assets.items) ? project.assets.items : [];
-            if (assetItems.length) {
-              assetItems.forEach(asset => {
-                const chip = document.createElement('span');
-                chip.className = 'asset-chip';
-                chip.textContent = asset.name;
-                const removeBtn = document.createElement('button');
-                removeBtn.type = 'button';
-                removeBtn.className = 'asset-chip-remove';
-                removeBtn.textContent = '×';
-                removeBtn.title = 'Remove asset';
-                removeBtn.addEventListener('click', async (evt) => {
-                  evt.stopPropagation();
-                  try {
-                    await detachAssetFromProject(project.id, asset.id);
-                    await refreshCurrentBudget();
-                  } catch (err) {
-                    showError(err);
-                  }
-                });
-                chip.appendChild(removeBtn);
-                assetList.appendChild(chip);
-              });
-            } else {
-              const empty = document.createElement('span');
-              empty.className = 'asset-empty';
-              empty.textContent = 'None';
-              assetList.appendChild(empty);
-            }
-            assetsLine.appendChild(assetList);
-
-            const addAssetBtn = document.createElement('button');
-            addAssetBtn.type = 'button';
-            addAssetBtn.className = 'asset-add-btn';
-            addAssetBtn.textContent = '+ Asset';
-            addAssetBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openAssetModal(projectNode);
-            });
-            assetsLine.appendChild(addAssetBtn);
-            header.appendChild(assetsLine);
-
-            wrapper.appendChild(header);
-
-            const rows = document.createElement('div');
-            rows.className = 'ledger-rows';
-            if (!expanded) rows.style.display = 'none';
-            const categoryChildren = [...(projectNode.children || project.children || [])];
-            categoryChildren.sort((a, b) => {
-              const an = (a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a.name || '');
-              const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
-              return an.localeCompare(bn);
-            });
-            categoryChildren.forEach((child, idx) => {
-              const isLast = idx === categoryChildren.length - 1;
-              rows.appendChild(renderCategory(child, [], !isLast));
-            });
-            wrapper.appendChild(rows);
-
-            return wrapper;
-          }
-
-          function renderCategory(category, ancestorLines = [], hasSiblingAfter = false) {
-            const key = makeKey(category);
-            const hasChildren = category.children && category.children.length;
-            const expanded = hasChildren ? fundingState.expanded.has(key) : true;
-
-            const fragment = document.createDocumentFragment();
-
-            const depth = ancestorLines.length;
-
-            const row = document.createElement('div');
-            row.className = `ledger-row category${category.is_leaf ? ' leaf' : ''}`;
-            row.style.setProperty('--depth', depth);
-            row.dataset.depth = depth;
-
-            const treeCol = document.createElement('div');
-            treeCol.className = 'ledger-tree';
-            if (depth === 0) treeCol.classList.add('tree-root');
-
-            if (ancestorLines.length) {
-              const stems = document.createElement('div');
-              stems.className = 'tree-stems';
-              ancestorLines.forEach(hasSibling => {
-                const stem = document.createElement('span');
-                stem.className = 'tree-stem';
-                if (hasSibling) stem.dataset.active = '1';
-                stems.appendChild(stem);
-              });
-              treeCol.appendChild(stems);
-            }
-
-            const elbow = document.createElement('div');
-            elbow.className = 'tree-elbow';
-            if (depth === 0) elbow.classList.add('tree-elbow-root');
-            if (hasSiblingAfter || hasChildren) elbow.dataset.extend = '1';
-
-            const collapseBtn = document.createElement('button');
-            collapseBtn.className = 'collapse';
-            collapseBtn.type = 'button';
-            collapseBtn.textContent = hasChildren ? (expanded ? '▾' : '▸') : '';
-            collapseBtn.disabled = !hasChildren;
-            elbow.appendChild(collapseBtn);
-            treeCol.appendChild(elbow);
-
-            const nameCol = document.createElement('div');
-            nameCol.className = 'ledger-col name';
-            const treeLabel = document.createElement('div');
-            treeLabel.className = `tree-label${category.is_leaf ? ' leaf' : ''}`;
-            treeLabel.dataset.autoGrowHost = '1';
-
-            const nameInput = document.createElement('textarea');
-            nameInput.rows = 1;
-            nameInput.value = category.name || '';
-            nameInput.placeholder = 'Category name';
-            attachEnterCommit(nameInput);
-            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 320, minHeight: 32 });
-            nameInput.addEventListener('change', async () => {
-              const next = nameInput.value.trim();
-              if (!next || next === category.name) {
-                nameInput.value = category.name || '';
-                triggerAutoGrow(nameInput);
-                return;
-              }
-              await saveCategoryPatch(category.id, { name: next });
-              triggerAutoGrow(nameInput);
-            });
-            treeLabel.appendChild(nameInput);
-            nameCol.appendChild(treeLabel);
-            requestAnimationFrame(() => triggerAutoGrow(nameInput));
-
-            const tagCol = document.createElement('div');
-            tagCol.className = 'ledger-col tags';
-            attachTagRow(tagCol, category, { showLabel: false });
-
-            const subtotalCol = document.createElement('div');
-            subtotalCol.className = 'ledger-col subtotal';
-            if (category.is_leaf) {
-              const amountInput = document.createElement('textarea');
-              amountInput.rows = 1;
-              const hasValue = category.amount_leaf !== null && category.amount_leaf !== undefined;
-              amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
-              attachEnterCommit(amountInput);
-              amountInput.inputMode = 'decimal';
-              amountInput.spellcheck = false;
-              setupAutoGrow(amountInput, { maxPercent: 0.5, minWidth: 140, minHeight: 26, maxWidth: 220 });
-              amountInput.addEventListener('change', async () => {
-                const raw = amountInput.value.trim();
-                let next = null;
-                if (raw !== '') {
-                  const parsed = Number(raw);
-                  if (Number.isNaN(parsed)) {
-                    amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
-                    showBanner('Amount must be numeric', 'warn');
-                    hideBanner(1600);
-                    return;
-                  }
-                  next = Math.round(parsed * 100) / 100;
-                }
-                await saveCategoryPatch(category.id, { amount_leaf: next });
-                triggerAutoGrow(amountInput);
-              });
-              subtotalCol.appendChild(amountInput);
-              requestAnimationFrame(() => triggerAutoGrow(amountInput));
-            } else {
-              subtotalCol.textContent = `Subtotal: ${fmtCurrency(category.rollup_amount)}`;
-            }
-
-            const actionsCol = document.createElement('div');
-            actionsCol.className = 'ledger-actions';
-
-            const groupBtn = document.createElement('button');
-            groupBtn.type = 'button';
-            groupBtn.textContent = '+ Group';
-            groupBtn.disabled = category.is_leaf;
-            groupBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
-                id: category.project_id || category.item_project_id,
-                budget_id: fundingState.selectedBudgetId,
-                name: 'Project',
-              };
-              const parentNode = getCategoryNode(category.id) || category;
-              openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: false });
-            });
-            actionsCol.appendChild(groupBtn);
-
-            const addLeafBtn = document.createElement('button');
-            addLeafBtn.type = 'button';
-            addLeafBtn.textContent = '+ Leaf';
-            addLeafBtn.disabled = category.is_leaf;
-            addLeafBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
-                id: category.project_id || category.item_project_id,
-                budget_id: fundingState.selectedBudgetId,
-                name: 'Project',
-              };
-              const parentNode = getCategoryNode(category.id) || category;
-              openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: true });
-            });
-            actionsCol.appendChild(addLeafBtn);
-
-            const moveBtn = document.createElement('button');
-            moveBtn.type = 'button';
-            moveBtn.textContent = 'Move';
-            moveBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openMoveCategoryModal(getCategoryNode(category.id) || category);
-            });
-            actionsCol.appendChild(moveBtn);
-
-            const inspectBtn = document.createElement('button');
-            inspectBtn.type = 'button';
-            inspectBtn.className = 'icon-btn';
-            inspectBtn.textContent = 'ℹ';
-            inspectBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openInspectorFor(category);
-            });
-            actionsCol.appendChild(inspectBtn);
-
-            row.append(treeCol, nameCol, tagCol, subtotalCol, actionsCol);
-            fragment.appendChild(row);
-
-            collapseBtn.addEventListener('click', () => {
-              if (!hasChildren) return;
-              if (expanded) {
-                fundingState.expanded.delete(key);
-              } else {
-                fundingState.expanded.add(key);
-              }
-              persistExpansionState(fundingState.selectedBudgetId);
-              renderLedger();
-            });
-
-            if (hasChildren) {
-              const childrenContainer = document.createElement('div');
-              childrenContainer.className = 'ledger-children';
-              if (!expanded) childrenContainer.style.display = 'none';
-              const childNodes = [...(category.children || [])];
-              childNodes.sort((a, b) => {
-                const an = (a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a.name || '');
-                const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
-                return an.localeCompare(bn);
-              });
-              childNodes.forEach((child, idx) => {
-                const isLast = idx === childNodes.length - 1;
-                childrenContainer.appendChild(renderCategory(child, [...ancestorLines, hasSiblingAfter], !isLast));
-              });
-              fragment.appendChild(childrenContainer);
-            }
-
-            return fragment;
           }
 
           function closeInspector() {

@@ -309,6 +309,7 @@ class FundingTreeNode(BaseModel):
     rollup_amount: Optional[float] = None
     project_id: Optional[int] = None
     budget_id: Optional[int] = None
+    parent_id: Optional[int] = None
     path_ids: Optional[List[int]] = None
     path_names: Optional[List[str]] = None
     tags: Optional[TagBundleOut] = None

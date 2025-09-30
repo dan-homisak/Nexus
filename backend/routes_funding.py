@@ -150,6 +150,7 @@ def _tree_node_to_schema(data: dict) -> schemas.FundingTreeNode:
         rollup_amount=data.get("rollup_amount"),
         project_id=data.get("project_id"),
         budget_id=data.get("budget_id"),
+        parent_id=data.get("parent_id"),
         path_ids=_arr(data.get("path_ids")),
         path_names=_arr(data.get("path_names")),
         tags=_tag_bundle_schema(data.get("tags")),

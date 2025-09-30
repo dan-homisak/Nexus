@@ -489,14 +489,43 @@ def get_category(db: Session, category_id: int, *, include: IncludeSet) -> Dict[
     return result[0]
 
 
-def _validate_parent(db: Session, parent_id: Optional[int], project_id: int, budget_id: int) -> None:
+def _validate_parent(
+    db: Session, parent_id: Optional[int], project_id: int, budget_id: int
+) -> Optional[models.Category]:
     if parent_id is None:
-        return
+        return None
     parent = db.get(models.Category, parent_id)
     if not parent:
         raise FundingServiceError("parent category not found", code="invalid_parent")
     if parent.project_id != project_id or parent.budget_id != budget_id:
         raise FundingServiceError("parent category must share budget and project", code="invalid_parent")
+    return parent
+
+
+def _mark_parent_has_children(parent: Optional[models.Category]) -> None:
+    if not parent:
+        return
+    if parent.is_leaf:
+        parent.is_leaf = False
+        parent.amount_leaf = None
+
+
+def _refresh_parent_leaf_state(db: Session, parent_id: Optional[int]) -> None:
+    if parent_id is None:
+        return
+    parent = db.get(models.Category, parent_id)
+    if not parent:
+        return
+    child_count = db.execute(
+        select(func.count()).where(models.Category.parent_id == parent_id)
+    ).scalar()
+    if not child_count:
+        parent.is_leaf = True
+        if parent.amount_leaf is None:
+            parent.amount_leaf = Decimal("0")
+    else:
+        parent.is_leaf = False
+        parent.amount_leaf = None
 
 
 def create_category(
@@ -510,7 +539,7 @@ def create_category(
     amount_leaf: Optional[Decimal],
     description: Optional[str],
 ) -> models.Category:
-    _validate_parent(db, parent_id, project_id, budget_id)
+    parent = _validate_parent(db, parent_id, project_id, budget_id)
     if not is_leaf:
         amount_leaf = None
     elif amount_leaf is not None and not isinstance(amount_leaf, Decimal):
@@ -525,6 +554,7 @@ def create_category(
         description=description,
     )
     db.add(category)
+    _mark_parent_has_children(parent)
     db.commit()
     db.refresh(category)
     return category
@@ -560,8 +590,18 @@ def update_category(
         if parent_id == category.id:
             raise FundingServiceError("category cannot be its own parent", code="invalid_parent")
         _assert_no_subtree_allocations(db, category_id)
-        _validate_parent(db, parent_id, target_project, target_budget)
+        old_parent_id = category.parent_id
+        new_parent = _validate_parent(db, parent_id, target_project, target_budget)
         category.parent_id = parent_id
+        db.flush()
+        _mark_parent_has_children(new_parent)
+        _refresh_parent_leaf_state(db, old_parent_id)
+    elif parent_id is None and category.parent_id is not None:
+        _assert_no_subtree_allocations(db, category_id)
+        old_parent_id = category.parent_id
+        category.parent_id = None
+        db.flush()
+        _refresh_parent_leaf_state(db, old_parent_id)
 
     # Budget/project changes
     if (project_id is not None and project_id != category.project_id) or (
@@ -611,6 +651,7 @@ def update_category(
             category.amount_leaf = amount_leaf
 
     db.commit()
+    _refresh_parent_leaf_state(db, category.parent_id)
     db.refresh(category)
     return category
 
@@ -619,11 +660,13 @@ def delete_category(db: Session, category_id: int) -> None:
     category = db.get(models.Category, category_id)
     if not category:
         raise FundingServiceError("category not found", code="not_found")
+    parent_id = category.parent_id
     _assert_no_subtree_allocations(db, category_id)
     ids = _subtree_category_ids(db, category_id)
     clause, params = _build_in_clause("cat_del", ids)
     db.execute(text(f"DELETE FROM categories WHERE id IN ({clause})"), params)
     db.commit()
+    _refresh_parent_leaf_state(db, parent_id)
 
 
 def can_move_category(db: Session, category_id: int, *, new_parent_id: Optional[int]) -> Dict[str, Any]:
@@ -822,6 +865,7 @@ def budget_tree(
         "rollup_amount": _float(budget.budget_amount_cache),
         "project_id": None,
         "budget_id": budget.id,
+        "parent_id": None,
     }
     if "paths" in include:
         budget_node["path_ids"] = [budget.id]
@@ -841,6 +885,7 @@ def budget_tree(
             "rollup_amount": rollups.get(project.id, 0.0),
             "project_id": project.id,
             "budget_id": project.budget_id,
+            "parent_id": budget.id,
         }
         if "paths" in include:
             proj_node["path_ids"] = [budget.id, project.id]
@@ -864,6 +909,7 @@ def budget_tree(
             "rollup_amount": _float(category.rollup_amount),
             "project_id": category.project_id,
             "budget_id": category.budget_id,
+            "parent_id": category.parent_id,
         }
         if "paths" in include:
             node["path_ids"] = category.path_ids
