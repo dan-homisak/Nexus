@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date as DateType
+from datetime import date as DateType, datetime as DateTimeType
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -161,12 +161,21 @@ def create_budget(
     closure_date: Optional[str],
     description: Optional[str],
 ) -> models_finance.FundingSource:
+    parsed_closure_date = None
+    if closure_date not in (None, ""):
+        try:
+            parsed_closure_date = DateType.fromisoformat(closure_date)
+        except ValueError as exc:
+            raise FundingServiceError("invalid closure_date format", code="invalid_closure_date") from exc
+    now = DateTimeType.utcnow()
     budget = models_finance.FundingSource(
         name=name,
         owner=owner,
         is_cost_center=is_cost_center,
-        closure_date=closure_date,
+        closure_date=parsed_closure_date,
         description=description,
+        created_at=now,
+        updated_at=now,
     )
     db.add(budget)
     db.commit()
@@ -337,7 +346,15 @@ def create_item_project(
     name: str,
     description: Optional[str],
 ) -> models.Project:
-    project = models.Project(budget_id=budget_id, name=name, description=description, portfolio_id=budget_id)
+    now = DateTimeType.utcnow()
+    project = models.Project(
+        budget_id=budget_id,
+        name=name,
+        description=description,
+        portfolio_id=budget_id,
+        created_at=now,
+        updated_at=now,
+    )
     db.add(project)
     db.commit()
     db.refresh(project)

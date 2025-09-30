@@ -747,6 +747,7 @@
           '#5c6bf1', '#49a078', '#f1a45c', '#f16a6a', '#7f7aea', '#5cc1f1', '#a05cf1', '#f15ccc', '#8dd06c', '#f1c65c',
         ];
         const DEFAULT_TAG_COLOR = '#4b5771';
+        const TEXT_FIELD_TYPES = new Set(['text', 'textarea']);
 
         const randomTagColor = () => TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)];
 
@@ -909,9 +910,9 @@
             wrapper.appendChild(title);
             let input;
             const type = field.type || 'text';
-            if (type === 'textarea') {
+            if (TEXT_FIELD_TYPES.has(type)) {
+              const rows = field.rows || (type === 'textarea' ? 3 : 1);
               input = document.createElement('textarea');
-              const rows = field.rows || 3;
               input.rows = rows;
               input.value = field.value ?? '';
               if (!field.disableAutoGrow) {
@@ -922,6 +923,7 @@
                   maxWidth: field.maxWidth ?? null,
                   minHeight,
                 });
+                requestAnimationFrame(() => triggerAutoGrow(input));
               }
             } else if (type === 'checkbox') {
               input = document.createElement('input');
@@ -1588,6 +1590,7 @@
           field.style.resize = 'none';
           field.style.overflow = 'hidden';
           field.style.minHeight = `${minHeight}px`;
+          field.style.minWidth = `${minWidth}px`;
 
           const computeWidth = () => {
             const host = field.closest('[data-auto-grow-host], .ledger-row, .ledger-header-line, .ledger-budget-card, .modal-field, .modal');
@@ -2346,6 +2349,16 @@
                   }
                   await apiCreate('/api/categories', payload);
                   helpers.close();
+                  const budgetKey = projectNode.budget_id || fundingState.selectedBudgetId;
+                  if (budgetKey) {
+                    const projectKey = `project:${projectNode.id}`;
+                    fundingState.expanded.add(projectKey);
+                    if (parentCategory) {
+                      const parentKey = `${parentCategory.type || 'category'}:${parentCategory.id}`;
+                      fundingState.expanded.add(parentKey);
+                    }
+                    persistExpansionState(budgetKey);
+                  }
                   showBanner('Category created', 'success');
                   hideBanner(1500);
                   await refreshCurrentBudget();
@@ -2455,18 +2468,25 @@
             line1.appendChild(makeInlineField('Name', nameInput));
             requestAnimationFrame(() => triggerAutoGrow(nameInput));
 
-            const ownerInput = document.createElement('input');
+            const ownerInput = document.createElement('textarea');
+            ownerInput.rows = 1;
             ownerInput.value = budget.owner || '';
             ownerInput.placeholder = 'Owner';
             attachEnterCommit(ownerInput);
+            setupAutoGrow(ownerInput, { maxPercent: 0.6, minWidth: 220, minHeight: 32 });
             ownerInput.disabled = !!budget.is_cost_center;
             ownerInput.addEventListener('change', async () => {
               const next = ownerInput.value.trim();
               const normalized = next === '' ? null : next;
-              if ((budget.owner || null) === normalized) return;
+              if ((budget.owner || null) === normalized) {
+                triggerAutoGrow(ownerInput);
+                return;
+              }
               await saveBudgetPatch(budget.id, { owner: normalized });
+              triggerAutoGrow(ownerInput);
             });
             line1.appendChild(makeInlineField('Owner', ownerInput));
+            requestAnimationFrame(() => triggerAutoGrow(ownerInput));
 
             const costCenterInput = document.createElement('input');
             costCenterInput.type = 'checkbox';
@@ -2475,6 +2495,7 @@
               const next = !!costCenterInput.checked;
               if (next === !!budget.is_cost_center) return;
               ownerInput.disabled = next;
+              triggerAutoGrow(ownerInput);
               closureInput.disabled = next;
               await saveBudgetPatch(budget.id, { is_cost_center: next });
             });
@@ -2651,7 +2672,7 @@
             nameInput.value = project.name || '';
             nameInput.placeholder = 'Project name';
             attachEnterCommit(nameInput);
-            setupAutoGrow(nameInput, { maxPercent: 0.5, minWidth: 240, minHeight: 32 });
+            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 320, minHeight: 32 });
             nameInput.addEventListener('change', async () => {
               const next = nameInput.value.trim();
               if (!next || next === project.name) {
@@ -2666,6 +2687,7 @@
             requestAnimationFrame(() => triggerAutoGrow(nameInput));
 
             const tagInline = document.createElement('div');
+            tagInline.className = 'ledger-inline ledger-inline-tags';
             attachTagRow(tagInline, project, { showLabel: false });
             line.appendChild(tagInline);
 
@@ -2788,30 +2810,57 @@
               const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
               return an.localeCompare(bn);
             });
-            categoryChildren.forEach(child => {
-              rows.appendChild(renderCategory(child, 0));
+            categoryChildren.forEach((child, idx) => {
+              const isLast = idx === categoryChildren.length - 1;
+              rows.appendChild(renderCategory(child, [], !isLast));
             });
             wrapper.appendChild(rows);
 
             return wrapper;
           }
 
-          function renderCategory(category, depth) {
+          function renderCategory(category, ancestorLines = [], hasSiblingAfter = false) {
             const key = makeKey(category);
             const hasChildren = category.children && category.children.length;
             const expanded = hasChildren ? fundingState.expanded.has(key) : true;
 
             const fragment = document.createDocumentFragment();
 
+            const depth = ancestorLines.length;
+
             const row = document.createElement('div');
             row.className = `ledger-row category${category.is_leaf ? ' leaf' : ''}`;
             row.style.setProperty('--depth', depth);
+            row.dataset.depth = depth;
+
+            const treeCol = document.createElement('div');
+            treeCol.className = 'ledger-tree';
+            if (depth === 0) treeCol.classList.add('tree-root');
+
+            if (ancestorLines.length) {
+              const stems = document.createElement('div');
+              stems.className = 'tree-stems';
+              ancestorLines.forEach(hasSibling => {
+                const stem = document.createElement('span');
+                stem.className = 'tree-stem';
+                if (hasSibling) stem.dataset.active = '1';
+                stems.appendChild(stem);
+              });
+              treeCol.appendChild(stems);
+            }
+
+            const elbow = document.createElement('div');
+            elbow.className = 'tree-elbow';
+            if (depth === 0) elbow.classList.add('tree-elbow-root');
+            if (hasSiblingAfter || hasChildren) elbow.dataset.extend = '1';
 
             const collapseBtn = document.createElement('button');
             collapseBtn.className = 'collapse';
             collapseBtn.type = 'button';
             collapseBtn.textContent = hasChildren ? (expanded ? '▾' : '▸') : '';
             collapseBtn.disabled = !hasChildren;
+            elbow.appendChild(collapseBtn);
+            treeCol.appendChild(elbow);
 
             const nameCol = document.createElement('div');
             nameCol.className = 'ledger-col name';
@@ -2824,7 +2873,7 @@
             nameInput.value = category.name || '';
             nameInput.placeholder = 'Category name';
             attachEnterCommit(nameInput);
-            setupAutoGrow(nameInput, { maxPercent: 0.5, minWidth: 220, minHeight: 32 });
+            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 320, minHeight: 32 });
             nameInput.addEventListener('change', async () => {
               const next = nameInput.value.trim();
               if (!next || next === category.name) {
@@ -2836,25 +2885,24 @@
               triggerAutoGrow(nameInput);
             });
             treeLabel.appendChild(nameInput);
-            const filler = document.createElement('span');
-            filler.className = 'tree-fill';
-            treeLabel.appendChild(filler);
             nameCol.appendChild(treeLabel);
             requestAnimationFrame(() => triggerAutoGrow(nameInput));
 
             const tagCol = document.createElement('div');
             tagCol.className = 'ledger-col tags';
             attachTagRow(tagCol, category, { showLabel: false });
-            
+
             const subtotalCol = document.createElement('div');
             subtotalCol.className = 'ledger-col subtotal';
             if (category.is_leaf) {
-              const amountInput = document.createElement('input');
-              amountInput.type = 'number';
-              amountInput.step = '0.01';
+              const amountInput = document.createElement('textarea');
+              amountInput.rows = 1;
               const hasValue = category.amount_leaf !== null && category.amount_leaf !== undefined;
               amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
               attachEnterCommit(amountInput);
+              amountInput.inputMode = 'decimal';
+              amountInput.spellcheck = false;
+              setupAutoGrow(amountInput, { maxPercent: 0.5, minWidth: 140, minHeight: 26, maxWidth: 220 });
               amountInput.addEventListener('change', async () => {
                 const raw = amountInput.value.trim();
                 let next = null;
@@ -2869,8 +2917,10 @@
                   next = Math.round(parsed * 100) / 100;
                 }
                 await saveCategoryPatch(category.id, { amount_leaf: next });
+                triggerAutoGrow(amountInput);
               });
               subtotalCol.appendChild(amountInput);
+              requestAnimationFrame(() => triggerAutoGrow(amountInput));
             } else {
               subtotalCol.textContent = `Subtotal: ${fmtCurrency(category.rollup_amount)}`;
             }
@@ -2929,7 +2979,7 @@
             });
             actionsCol.appendChild(inspectBtn);
 
-            row.append(collapseBtn, nameCol, tagCol, subtotalCol, actionsCol);
+            row.append(treeCol, nameCol, tagCol, subtotalCol, actionsCol);
             fragment.appendChild(row);
 
             collapseBtn.addEventListener('click', () => {
@@ -2953,8 +3003,9 @@
                 const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
                 return an.localeCompare(bn);
               });
-              childNodes.forEach(child => {
-                childrenContainer.appendChild(renderCategory(child, depth + 1));
+              childNodes.forEach((child, idx) => {
+                const isLast = idx === childNodes.length - 1;
+                childrenContainer.appendChild(renderCategory(child, [...ancestorLines, hasSiblingAfter], !isLast));
               });
               fragment.appendChild(childrenContainer);
             }
