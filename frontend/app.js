@@ -746,8 +746,125 @@
         const TAG_COLORS = [
           '#5c6bf1', '#49a078', '#f1a45c', '#f16a6a', '#7f7aea', '#5cc1f1', '#a05cf1', '#f15ccc', '#8dd06c', '#f1c65c',
         ];
+        const DEFAULT_TAG_COLOR = '#4b5771';
 
         const randomTagColor = () => TAG_COLORS[Math.floor(Math.random() * TAG_COLORS.length)];
+
+        function parseHexColor(input) {
+          if (!input) return null;
+          const normalized = String(input).trim();
+          const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(normalized);
+          if (!match) return null;
+          let hex = match[1];
+          if (hex.length === 3) hex = hex.split('').map(ch => ch + ch).join('');
+          const int = parseInt(hex, 16);
+          return {
+            r: (int >> 16) & 0xff,
+            g: (int >> 8) & 0xff,
+            b: int & 0xff,
+          };
+        }
+
+        function buildTagPalette(color) {
+          const rgb = parseHexColor(color) || parseHexColor(DEFAULT_TAG_COLOR);
+          if (!rgb) return null;
+          const { r, g, b } = rgb;
+          const text = '#ffffff';
+          return {
+            border: `rgba(${r}, ${g}, ${b}, 0.55)`,
+            background: `rgba(${r}, ${g}, ${b}, 0.18)`,
+            hover: `rgba(${r}, ${g}, ${b}, 0.26)`,
+            text,
+          };
+        }
+
+        function inferTagTone(name) {
+          const lower = (name || '').toLowerCase();
+          if (lower.includes('priority') && lower.includes('high')) return 'warn';
+          if (lower.includes('risk') || lower.includes('alert')) return 'warn';
+          if (lower.includes('info') || lower.includes('safety') || lower.includes('quality')) return 'info';
+          return 'neutral';
+        }
+
+        function styleTagPill(pill, tag) {
+          if (!pill) return;
+          const palette = buildTagPalette(tag.color);
+          if (palette) {
+            delete pill.dataset.tone;
+            pill.style.setProperty('--tag-border', palette.border);
+            pill.style.setProperty('--tag-bg', palette.background);
+            pill.style.setProperty('--tag-bg-hover', palette.hover);
+            pill.style.setProperty('--tag-text', palette.text);
+          } else {
+            const tone = inferTagTone(tag.name);
+            if (tone && tone !== 'neutral') {
+              pill.dataset.tone = tone;
+            } else {
+              delete pill.dataset.tone;
+            }
+            pill.style.removeProperty('--tag-border');
+            pill.style.removeProperty('--tag-bg');
+            pill.style.removeProperty('--tag-bg-hover');
+            pill.style.removeProperty('--tag-text');
+          }
+        }
+
+        function createTagChip(tag, { inherited = false, onEdit, onRemove } = {}) {
+          const label = `#${tag.name}`;
+          const chip = document.createElement('span');
+          chip.className = 'tag-pill';
+          chip.dataset.inherited = inherited ? '1' : '0';
+          chip.tabIndex = 0;
+          chip.setAttribute('role', 'button');
+          chip.title = label;
+
+          const textEl = document.createElement('span');
+          textEl.className = 'tag-pill-label';
+          textEl.textContent = label;
+          chip.appendChild(textEl);
+
+          styleTagPill(chip, tag);
+
+          if (typeof onRemove === 'function' && !inherited) {
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'tag-pill-remove';
+            removeBtn.innerHTML = '×';
+            removeBtn.title = `Remove ${label}`;
+            removeBtn.setAttribute('aria-label', `Remove ${label}`);
+            removeBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              onRemove(tag, chip, evt);
+            });
+            chip.appendChild(removeBtn);
+          }
+
+          if (typeof onEdit === 'function') {
+            const openEditor = (evt) => {
+              onEdit(tag, chip, evt);
+            };
+            chip.addEventListener('click', (evt) => {
+              if (!inherited && typeof onRemove === 'function' && (evt.altKey || evt.metaKey || evt.shiftKey)) {
+                evt.stopPropagation();
+                onRemove(tag, chip, evt);
+                return;
+              }
+              openEditor(evt);
+            });
+            chip.addEventListener('keydown', (evt) => {
+              if (evt.key === 'Enter' || evt.key === ' ') {
+                evt.preventDefault();
+                openEditor(evt);
+              }
+              if (!inherited && typeof onRemove === 'function' && (evt.key === 'Backspace' || evt.key === 'Delete')) {
+                evt.preventDefault();
+                onRemove(tag, chip, evt);
+              }
+            });
+          }
+
+          return chip;
+        }
 
         function openFormModal({ title, fields, submitLabel = 'Save', onSubmit, width }) {
           const overlay = document.createElement('div');
@@ -794,8 +911,18 @@
             const type = field.type || 'text';
             if (type === 'textarea') {
               input = document.createElement('textarea');
-              input.rows = field.rows || 3;
+              const rows = field.rows || 3;
+              input.rows = rows;
               input.value = field.value ?? '';
+              if (!field.disableAutoGrow) {
+                const minHeight = field.minHeight ?? Math.max(26, rows * 22);
+                setupAutoGrow(input, {
+                  maxPercent: field.maxPercent ?? 0.95,
+                  minWidth: field.minWidth ?? 200,
+                  maxWidth: field.maxWidth ?? null,
+                  minHeight,
+                });
+              }
             } else if (type === 'checkbox') {
               input = document.createElement('input');
               input.type = 'checkbox';
@@ -1099,45 +1226,6 @@
           panel.style.left = `${Math.max(8, left + window.scrollX)}px`;
         }
 
-        function createTagChip(tag, { inherited = false, onEdit, onRemove } = {}) {
-          const chip = document.createElement('span');
-          chip.className = `tag-chip${inherited ? ' tag-chip-inherited' : ''}${tag.is_deprecated ? ' tag-chip-deprecated' : ''}`;
-          chip.dataset.tagId = tag.id;
-          const swatch = document.createElement('span');
-          swatch.className = 'tag-swatch';
-          swatch.style.background = tag.color || '#3b4866';
-          chip.appendChild(swatch);
-          const label = document.createElement('span');
-          label.className = 'tag-label';
-          label.textContent = `#${tag.name}`;
-          chip.appendChild(label);
-          if (onEdit) {
-            const editBtn = document.createElement('button');
-            editBtn.type = 'button';
-            editBtn.className = 'tag-chip-btn tag-chip-edit';
-            editBtn.title = 'Edit tag';
-            editBtn.textContent = '✎';
-            editBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              onEdit(tag, chip, evt);
-            });
-            chip.appendChild(editBtn);
-          }
-          if (!inherited && onRemove) {
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'tag-chip-btn tag-chip-remove';
-            removeBtn.title = 'Remove tag';
-            removeBtn.textContent = '×';
-            removeBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              onRemove(tag, chip, evt);
-            });
-            chip.appendChild(removeBtn);
-          }
-          return chip;
-        }
-
         function formatUsageSummary(assignments) {
           if (!assignments) return '';
           const parts = Object.entries(assignments).filter(([, v]) => v > 0).map(([k, v]) => `${k}: ${v}`);
@@ -1186,6 +1274,9 @@
           const nameInput = panel.querySelector('.tag-editor-name');
           const colorInput = panel.querySelector('.tag-editor-color');
           const descInput = panel.querySelector('.tag-editor-desc');
+          if (descInput) {
+            setupAutoGrow(descInput, { maxPercent: 0.9, minWidth: 220, minHeight: 60 });
+          }
           const deprecatedInput = panel.querySelector('.tag-editor-deprecated');
           const deleteBtn = panel.querySelector('.tag-editor-delete');
           const closeBtn = panel.querySelector('.tag-editor-close');
@@ -1492,6 +1583,72 @@
 
 
 
+        function setupAutoGrow(field, { maxPercent = 0.33, minWidth = 140, maxWidth = null, minHeight = 26 } = {}) {
+          if (!field || field.__autoGrowHandler) return;
+          field.style.resize = 'none';
+          field.style.overflow = 'hidden';
+          field.style.minHeight = `${minHeight}px`;
+
+          const computeWidth = () => {
+            const host = field.closest('[data-auto-grow-host], .ledger-row, .ledger-header-line, .ledger-budget-card, .modal-field, .modal');
+            const hostWidth = host ? host.clientWidth : 0;
+            let limit = hostWidth ? hostWidth * maxPercent : minWidth * 2;
+            if (typeof maxWidth === 'number' && !Number.isNaN(maxWidth)) {
+              limit = Math.min(limit, maxWidth);
+            }
+            return Math.max(minWidth, limit || minWidth);
+          };
+
+          const update = () => {
+            const nextWidth = computeWidth();
+            field.style.width = `${nextWidth}px`;
+            field.style.height = 'auto';
+            const nextHeight = Math.max(minHeight, field.scrollHeight);
+            field.style.height = `${nextHeight}px`;
+          };
+
+          const handler = () => requestAnimationFrame(update);
+          field.__autoGrowHandler = handler;
+
+          const cleanup = () => {
+            field.removeEventListener('input', handler);
+            field.removeEventListener('focus', handler);
+            field.removeEventListener('blur', handler);
+            window.removeEventListener('resize', handler);
+            if (field.__autoGrowObserver) {
+              field.__autoGrowObserver.disconnect();
+              delete field.__autoGrowObserver;
+            }
+            delete field.__autoGrowHandler;
+          };
+
+          field.addEventListener('input', handler);
+          field.addEventListener('focus', handler);
+          field.addEventListener('blur', handler);
+          window.addEventListener('resize', handler);
+
+          let observer = null;
+          if (typeof MutationObserver !== 'undefined') {
+            observer = new MutationObserver(() => {
+              if (!field.isConnected) {
+                cleanup();
+              }
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+            field.__autoGrowObserver = observer;
+          }
+
+          update();
+          requestAnimationFrame(update);
+          return cleanup;
+        }
+
+        function triggerAutoGrow(field) {
+          if (field && typeof field.__autoGrowHandler === 'function') {
+            field.__autoGrowHandler();
+          }
+        }
+
         function ensureReallocateDrawer() {
           if (reallocateDrawer) return reallocateDrawer;
           const drawer = document.createElement('div');
@@ -1696,6 +1853,7 @@
           const listEl = content.querySelector('#fundingList');
           const ledgerEl = content.querySelector('#fundingLedger');
           const inspectorEl = content.querySelector('#inspectorDrawer');
+          const shellEl = content.querySelector('.funding-shell');
           const searchInput = content.querySelector('#budgetSearch');
           const newBudgetBtn = content.querySelector('#newBudgetButton');
           const tagManagerBtn = content.querySelector('#tagManagerButton');
@@ -1817,92 +1975,227 @@
             fundingState.budgets.forEach(budget => {
               const item = document.createElement('button');
               item.className = 'funding-item';
-              item.innerHTML = `
-                <div class="funding-item-name">${escapeHtml(budget.name)}</div>
-                <div class="funding-item-meta">Owner: ${escapeHtml(budget.owner || '—')}</div>
-                <div class="funding-item-total">${fmtCurrency(budget.budget_amount_cache)}</div>`;
               if (budget.id === fundingState.selectedBudgetId) item.classList.add('active');
+
+              const name = document.createElement('div');
+              name.className = 'funding-item-name';
+              name.textContent = budget.name;
+              item.appendChild(name);
+
+              const total = document.createElement('div');
+              total.className = 'funding-item-total';
+              const numericTotal = Number(budget.budget_amount_cache || 0);
+              if (numericTotal < 0) total.classList.add('err');
+              else if (!numericTotal) total.classList.add('warn');
+              total.textContent = fmtCurrency(numericTotal);
+              item.appendChild(total);
+
+              const metrics = document.createElement('div');
+              metrics.className = 'funding-item-metrics';
+              const stats = budget.stats || {};
+              const metricDefs = [
+                { label: 'Categories', value: stats.category_count },
+                { label: 'Leaves', value: stats.leaf_count },
+                { label: 'Entries', value: stats.entry_count },
+                { label: 'Alloc', value: stats.allocation_count },
+              ];
+              metricDefs.forEach(def => {
+                if (def.value === undefined || def.value === null) return;
+                const span = document.createElement('span');
+                span.className = 'funding-item-metric';
+                span.innerHTML = `<span>${def.label}</span><strong>${def.value}</strong>`;
+                metrics.appendChild(span);
+              });
+              const owner = document.createElement('span');
+              owner.className = 'funding-item-metric';
+              owner.innerHTML = `<span>Owner</span><strong>${escapeHtml(budget.owner || '—')}</strong>`;
+              metrics.appendChild(owner);
+              item.appendChild(metrics);
+
+              const tagsLine = document.createElement('div');
+              tagsLine.className = 'funding-item-tags';
+              const directTags = (budget.tags?.direct || []).slice(0, 5);
+              directTags.forEach(tag => {
+                const chip = document.createElement('span');
+                chip.textContent = `#${tag.name}`;
+                tagsLine.appendChild(chip);
+              });
+              if (budget.is_cost_center) {
+                const chip = document.createElement('span');
+                chip.textContent = 'COST CENTER';
+                tagsLine.appendChild(chip);
+              }
+              if (tagsLine.children.length) item.appendChild(tagsLine);
+
               item.addEventListener('click', () => selectBudget(budget.id));
               listEl.appendChild(item);
             });
           }
 
-          function attachTagRow(container, node) {
+          function attachTagRow(container, node, { showLabel = false } = {}) {
             const scope = { entity_type: toScopeType(node.type), entity_id: node.id, type: node.type };
-            const tagLine = document.createElement('div');
-            tagLine.className = 'tag-chip-row';
-            const tags = node.tags || { direct: [], inherited: [] };
-            const directIds = new Set((tags.direct || []).map(t => t.id));
+            if (container.__tagObserver) container.__tagObserver.disconnect();
+            if (container.__tagOutside) {
+              document.removeEventListener('mousedown', container.__tagOutside, true);
+            }
+            container.innerHTML = '';
+            container.classList.add('tag-region');
+            container.style.position = 'relative';
 
-            const handleAssign = async () => {
-              await refreshCurrentBudget();
-            };
-
-            const handleRemove = async (tag) => {
-              try {
-                await api('/api/tags/assign', {
-                  method: 'DELETE',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ tag_id: tag.id, entity_type: scope.entity_type, entity_id: scope.entity_id, actor: 'UI' }),
-                });
-                await refreshCurrentBudget();
-                enqueueScopedRebuild(scope);
-              } catch (err) {
-                showError(err);
-              }
-            };
-
-            const handleEdit = (tag, anchor) => {
-              openTagEditor(anchor, tag, {
-                onSaved: async (updated) => {
-                  if (!updated) {
-                    await refreshCurrentBudget();
-                    return;
-                  }
-                  applyTagUpdate(updated);
-                  await refreshCurrentBudget();
-                },
-              });
-            };
-
-            (tags.direct || []).forEach(tag => {
-              const chip = createTagChip(tag, {
-                inherited: false,
-                onEdit: handleEdit,
-                onRemove: (t, anchor) => handleRemove(t, anchor),
-              });
-              chip.addEventListener('click', (evt) => {
-                if (evt.target === chip) handleEdit(tag, chip);
-              });
-              tagLine.appendChild(chip);
-            });
-
-            (tags.inherited || []).forEach(tag => {
-              const chip = createTagChip(tag, {
-                inherited: true,
-                onEdit: handleEdit,
-              });
-              chip.addEventListener('click', () => handleEdit(tag, chip));
-              tagLine.appendChild(chip);
-            });
+            const listEl = document.createElement('div');
+            listEl.className = 'tag-list';
+            container.appendChild(listEl);
 
             const addBtn = document.createElement('button');
             addBtn.type = 'button';
-            addBtn.className = 'tag-add-btn';
+            addBtn.className = 'tag-add';
             addBtn.textContent = '+ Add tag';
+            container.appendChild(addBtn);
+
+            const tags = node.tags || { direct: [], inherited: [] };
+            const directIds = new Set((tags.direct || []).map(t => t.id));
+            const tagModels = [
+              ...(tags.direct || []).map(tag => ({ ...tag, inherited: false })),
+              ...(tags.inherited || []).map(tag => ({ ...tag, inherited: true })),
+            ];
+
+            const buildPill = (tag) => {
+              const label = `#${tag.name}`;
+              const pill = document.createElement('span');
+              pill.className = 'tag-pill';
+              pill.dataset.inherited = tag.inherited ? '1' : '0';
+              pill.tabIndex = 0;
+              pill.setAttribute('role', 'button');
+              pill.title = label;
+
+              const labelEl = document.createElement('span');
+              labelEl.className = 'tag-pill-label';
+              labelEl.textContent = label;
+              pill.appendChild(labelEl);
+
+              styleTagPill(pill, tag);
+
+              const unassignTag = async () => {
+                if (tag.inherited) return;
+                try {
+                  await api('/api/tags/assign', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tag_id: tag.id, entity_type: scope.entity_type, entity_id: scope.entity_id, actor: 'UI' }),
+                  });
+                  directIds.delete(tag.id);
+                  const idx = tagModels.findIndex(model => model.id === tag.id && !model.inherited);
+                  if (idx >= 0) tagModels.splice(idx, 1);
+                  removeTagFromBundles(tag.id, scope);
+                  renderTags();
+                  await refreshCurrentBudget();
+                  enqueueScopedRebuild(scope);
+                } catch (err) {
+                  showError(err);
+                }
+              };
+
+              if (!tag.inherited) {
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'tag-pill-remove';
+                removeBtn.innerHTML = '×';
+                removeBtn.title = `Remove ${label}`;
+                removeBtn.setAttribute('aria-label', `Remove ${label}`);
+                removeBtn.addEventListener('click', (evt) => {
+                  evt.stopPropagation();
+                  unassignTag();
+                });
+                pill.appendChild(removeBtn);
+              }
+
+              const openEditor = () => {
+                openTagEditor(pill, tag, {
+                  onSaved: async (updated) => {
+                    if (!updated) {
+                      await refreshCurrentBudget();
+                      return;
+                    }
+                    applyTagUpdate(updated);
+                    const idx = tagModels.findIndex(model => model.id === updated.id);
+                    if (idx >= 0) {
+                      tagModels[idx] = { ...tagModels[idx], ...updated };
+                    }
+                    renderTags();
+                    await refreshCurrentBudget();
+                  },
+                });
+              };
+
+              pill.addEventListener('click', (evt) => {
+                if (!tag.inherited && (evt.altKey || evt.metaKey || evt.shiftKey)) {
+                  evt.stopPropagation();
+                  unassignTag();
+                  return;
+                }
+                openEditor();
+              });
+
+              pill.addEventListener('keydown', (evt) => {
+                if (evt.key === 'Enter' || evt.key === ' ') {
+                  evt.preventDefault();
+                  openEditor();
+                }
+                if (!tag.inherited && (evt.key === 'Backspace' || evt.key === 'Delete')) {
+                  evt.preventDefault();
+                  unassignTag();
+                }
+              });
+
+              return pill;
+            };
+
+            function renderTags() {
+              listEl.innerHTML = '';
+              if (showLabel) {
+                const labelEl = document.createElement('span');
+                labelEl.className = 'tag-line-label';
+                labelEl.textContent = 'Tags:';
+                listEl.appendChild(labelEl);
+              }
+              tagModels.forEach(tag => listEl.appendChild(buildPill(tag)));
+            }
+
+            const observer = new ResizeObserver(() => {
+              renderTags();
+            });
+            observer.observe(container);
+            container.__tagObserver = observer;
+
+            renderTags();
+
             addBtn.addEventListener('click', (evt) => {
               evt.stopPropagation();
               openTagPicker(addBtn, {
                 node,
                 directIds,
-                onAssigned: handleAssign,
+                onAssigned: async () => {
+                  await refreshCurrentBudget();
+                },
                 onCreated: async () => {
                   await refreshTagUsage();
                 },
               });
             });
-            tagLine.appendChild(addBtn);
-            container.appendChild(tagLine);
+
+            container.__tagOutside = null;
+        }
+
+          function makeInlineField(labelText, element, extraClass) {
+            const inline = document.createElement('span');
+            inline.className = 'ledger-inline';
+            inline.dataset.autoGrowHost = '1';
+            if (extraClass) inline.classList.add(extraClass);
+            const label = document.createElement('span');
+            label.className = 'inline-label';
+            label.textContent = labelText;
+            inline.append(label, element);
+            return inline;
           }
 
           async function saveBudgetPatch(budgetId, patch) {
@@ -2122,17 +2415,6 @@
             });
           }
 
-          function createField(label, control, { grow = 1 } = {}) {
-            const wrapper = document.createElement('label');
-            wrapper.className = 'budget-field';
-            wrapper.style.setProperty('--grow', String(grow));
-            const title = document.createElement('span');
-            title.className = 'budget-field-label';
-            title.textContent = label;
-            wrapper.append(title, control);
-            return wrapper;
-          }
-
           function attachEnterCommit(input) {
             input.addEventListener('keydown', (evt) => {
               if (evt.key === 'Enter' && !evt.shiftKey) {
@@ -2146,21 +2428,32 @@
             const card = document.createElement('div');
             card.className = 'ledger-budget-card';
 
-            const row = document.createElement('div');
-            row.className = 'budget-edit-grid';
+            const line1 = document.createElement('div');
+            line1.className = 'ledger-line';
 
-            const nameInput = document.createElement('input');
+            const badge = document.createElement('span');
+            badge.className = 'label';
+            badge.textContent = 'Budget';
+            line1.appendChild(badge);
+
+            const nameInput = document.createElement('textarea');
+            nameInput.rows = 1;
             nameInput.value = budget.name || '';
             nameInput.placeholder = 'Budget name';
             attachEnterCommit(nameInput);
+            setupAutoGrow(nameInput, { maxPercent: 0.6, minWidth: 260, minHeight: 32 });
             nameInput.addEventListener('change', async () => {
               const next = nameInput.value.trim();
               if (!next || next === budget.name) {
                 nameInput.value = budget.name || '';
+                triggerAutoGrow(nameInput);
                 return;
               }
               await saveBudgetPatch(budget.id, { name: next });
+              triggerAutoGrow(nameInput);
             });
+            line1.appendChild(makeInlineField('Name', nameInput));
+            requestAnimationFrame(() => triggerAutoGrow(nameInput));
 
             const ownerInput = document.createElement('input');
             ownerInput.value = budget.owner || '';
@@ -2173,9 +2466,8 @@
               if ((budget.owner || null) === normalized) return;
               await saveBudgetPatch(budget.id, { owner: normalized });
             });
+            line1.appendChild(makeInlineField('Owner', ownerInput));
 
-            const costCenterWrap = document.createElement('div');
-            costCenterWrap.className = 'budget-checkbox-wrap';
             const costCenterInput = document.createElement('input');
             costCenterInput.type = 'checkbox';
             costCenterInput.checked = !!budget.is_cost_center;
@@ -2186,7 +2478,9 @@
               closureInput.disabled = next;
               await saveBudgetPatch(budget.id, { is_cost_center: next });
             });
-            costCenterWrap.appendChild(costCenterInput);
+            const costInline = makeInlineField('Cost Center', costCenterInput);
+            costInline.classList.add('inline-checkbox');
+            line1.appendChild(costInline);
 
             const closureInput = document.createElement('input');
             closureInput.type = 'date';
@@ -2199,55 +2493,49 @@
               if (current === (next || null)) return;
               await saveBudgetPatch(budget.id, { closure_date: next });
             });
+            line1.appendChild(makeInlineField('Closure', closureInput));
 
-            row.append(
-              createField('Name', nameInput, { grow: 2 }),
-              createField('Owner', ownerInput),
-              createField('Cost Center', costCenterWrap, { grow: 0 }),
-              createField('Closure Date', closureInput),
-            );
-
-            const totalField = document.createElement('div');
-            totalField.className = 'budget-field budget-total-field';
-            const totalLabel = document.createElement('span');
-            totalLabel.className = 'budget-field-label';
-            totalLabel.textContent = 'Budget Total';
             const totalValue = document.createElement('strong');
-            totalValue.className = 'budget-total-value';
+            totalValue.className = 'value';
             totalValue.textContent = fmtCurrency(budget.budget_amount_cache);
-            totalField.append(totalLabel, totalValue);
-            row.appendChild(totalField);
+            line1.appendChild(makeInlineField('Budget', totalValue, 'value'));
 
-            card.appendChild(row);
+            card.appendChild(line1);
 
-            const descRow = document.createElement('div');
-            descRow.className = 'ledger-budget-desc';
-            const tagContainer = document.createElement('div');
-            tagContainer.className = 'budget-tags';
-            attachTagRow(tagContainer, rootNode);
+            const tagLine = document.createElement('div');
+            tagLine.className = 'ledger-line ledger-tag-line';
+            attachTagRow(tagLine, rootNode, { showLabel: true });
+            card.appendChild(tagLine);
 
-            const descContainer = document.createElement('div');
-            descContainer.className = 'budget-desc-edit';
+            const descLine = document.createElement('div');
+            descLine.className = 'ledger-line';
+            descLine.dataset.autoGrowHost = '1';
             const descLabel = document.createElement('span');
-            descLabel.className = 'budget-field-label';
+            descLabel.className = 'label';
             descLabel.textContent = 'Description';
+            descLine.appendChild(descLabel);
+
             const descInput = document.createElement('textarea');
             descInput.rows = 2;
             descInput.placeholder = 'Describe this budget…';
             descInput.value = budget.description || '';
+            setupAutoGrow(descInput, { maxPercent: 0.98, minWidth: 320, minHeight: 60 });
             descInput.addEventListener('change', async () => {
               const next = descInput.value.trim();
               const normalized = next === '' ? null : next;
-              if ((budget.description || null) === normalized) return;
+              if ((budget.description || null) === normalized) {
+                triggerAutoGrow(descInput);
+                return;
+              }
               await saveBudgetPatch(budget.id, { description: normalized });
+              triggerAutoGrow(descInput);
             });
-            descContainer.append(descLabel, descInput);
-
-            descRow.append(tagContainer, descContainer);
-            card.appendChild(descRow);
+            descLine.appendChild(descInput);
+            card.appendChild(descLine);
+            requestAnimationFrame(() => triggerAutoGrow(descInput));
 
             const actionsRow = document.createElement('div');
-            actionsRow.className = 'budget-actions';
+            actionsRow.className = 'ledger-controls';
             const newItemBtn = document.createElement('button');
             newItemBtn.type = 'button';
             newItemBtn.className = 'btn-primary';
@@ -2344,43 +2632,107 @@
           }
 
           function renderProject(project) {
-            const key = makeKey(project);
-            const hasChildren = project.children && project.children.length;
-            const expanded = hasChildren ? fundingState.expanded.has(key) : true;
             const projectNode = getProjectNode(project.id) || project;
+            const key = makeKey(project);
+            const hasChildren = (projectNode.children && projectNode.children.length) || (project.children && project.children.length);
+            const expanded = hasChildren ? fundingState.expanded.has(key) : true;
+
             const wrapper = document.createElement('div');
             wrapper.className = 'ledger-project';
 
             const header = document.createElement('div');
-            header.className = 'ledger-row project';
+            header.className = 'ledger-section-header';
 
-            const collapseBtn = document.createElement('button');
-            collapseBtn.className = 'collapse';
-            collapseBtn.type = 'button';
-            collapseBtn.textContent = hasChildren ? (expanded ? '▾' : '▸') : '';
-            collapseBtn.disabled = !hasChildren;
+            const line = document.createElement('div');
+            line.className = 'ledger-header-line';
 
-            const nameCol = document.createElement('div');
-            nameCol.className = 'ledger-col name project-name-col';
-            const nameLabel = document.createElement('span');
-            nameLabel.className = 'project-label';
-            nameLabel.textContent = 'Item/Project';
-            const nameInput = document.createElement('input');
+            const nameInput = document.createElement('textarea');
+            nameInput.rows = 1;
             nameInput.value = project.name || '';
             nameInput.placeholder = 'Project name';
             attachEnterCommit(nameInput);
+            setupAutoGrow(nameInput, { maxPercent: 0.5, minWidth: 240, minHeight: 32 });
             nameInput.addEventListener('change', async () => {
               const next = nameInput.value.trim();
               if (!next || next === project.name) {
                 nameInput.value = project.name || '';
+                triggerAutoGrow(nameInput);
                 return;
               }
               await saveProjectPatch(project.id, { name: next });
+              triggerAutoGrow(nameInput);
             });
-            nameCol.append(nameLabel, nameInput);
+            line.appendChild(makeInlineField('Item/Project', nameInput));
+            requestAnimationFrame(() => triggerAutoGrow(nameInput));
 
-            const assetsCol = document.createElement('div');
-            assetsCol.className = 'ledger-col assets';
+            const tagInline = document.createElement('div');
+            attachTagRow(tagInline, project, { showLabel: false });
+            line.appendChild(tagInline);
+
+            const subtotal = document.createElement('span');
+            subtotal.className = 'amount';
+            subtotal.textContent = `Subtotal: ${fmtCurrency(project.rollup_amount || 0)}`;
+            line.appendChild(subtotal);
+
+            const headerActions = document.createElement('div');
+            headerActions.className = 'ledger-actions';
+
+            const toggleBtn = document.createElement('button');
+            toggleBtn.type = 'button';
+            toggleBtn.className = 'icon-btn';
+            toggleBtn.textContent = expanded ? '▾' : '▸';
+            toggleBtn.disabled = !hasChildren;
+            toggleBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              if (!hasChildren) return;
+              if (expanded) {
+                fundingState.expanded.delete(key);
+              } else {
+                fundingState.expanded.add(key);
+              }
+              persistExpansionState(fundingState.selectedBudgetId);
+              renderLedger();
+            });
+            headerActions.appendChild(toggleBtn);
+
+            const groupBtn = document.createElement('button');
+            groupBtn.type = 'button';
+            groupBtn.textContent = '+ Group';
+            groupBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openCategoryModal({ projectNode, parentCategory: null, isLeaf: false });
+            });
+            headerActions.appendChild(groupBtn);
+
+            const leafBtn = document.createElement('button');
+            leafBtn.type = 'button';
+            leafBtn.textContent = '+ Leaf';
+            leafBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openCategoryModal({ projectNode, parentCategory: null, isLeaf: true });
+            });
+            headerActions.appendChild(leafBtn);
+
+            const inspectBtn = document.createElement('button');
+            inspectBtn.type = 'button';
+            inspectBtn.className = 'icon-btn';
+            inspectBtn.textContent = 'ℹ';
+            inspectBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openInspectorFor(project);
+            });
+            headerActions.appendChild(inspectBtn);
+
+            line.appendChild(headerActions);
+            header.appendChild(line);
+
+            const assetsLine = document.createElement('div');
+            assetsLine.className = 'ledger-tag-line';
+            const assetsLabel = document.createElement('span');
+            assetsLabel.className = 'tag-line-label';
+            assetsLabel.textContent = 'Assets:';
+            assetsLine.appendChild(assetsLabel);
+
             const assetList = document.createElement('div');
             assetList.className = 'asset-chip-row';
             const assetItems = (project.assets && project.assets.items) ? project.assets.items : [];
@@ -2409,9 +2761,11 @@
             } else {
               const empty = document.createElement('span');
               empty.className = 'asset-empty';
-              empty.textContent = 'No assets';
+              empty.textContent = 'None';
               assetList.appendChild(empty);
             }
+            assetsLine.appendChild(assetList);
+
             const addAssetBtn = document.createElement('button');
             addAssetBtn.type = 'button';
             addAssetBtn.className = 'asset-add-btn';
@@ -2420,64 +2774,14 @@
               evt.stopPropagation();
               openAssetModal(projectNode);
             });
-            assetsCol.append(assetList, addAssetBtn);
+            assetsLine.appendChild(addAssetBtn);
+            header.appendChild(assetsLine);
 
-            const subtotalCol = document.createElement('div');
-            subtotalCol.className = 'ledger-col subtotal';
-            subtotalCol.textContent = `Subtotal: ${fmtCurrency(project.rollup_amount)}`;
-
-            const actionsCol = document.createElement('div');
-            actionsCol.className = 'ledger-actions';
-            const inspectBtn = document.createElement('button');
-            inspectBtn.type = 'button';
-            inspectBtn.textContent = 'Inspect';
-            inspectBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openInspectorFor(project);
-            });
-            actionsCol.appendChild(inspectBtn);
-
-            header.append(collapseBtn, nameCol, assetsCol, subtotalCol, actionsCol);
             wrapper.appendChild(header);
 
-            const tagRow = document.createElement('div');
-            tagRow.className = 'ledger-tags';
-            attachTagRow(tagRow, project);
-            wrapper.appendChild(tagRow);
-
-            const projectActions = document.createElement('div');
-            projectActions.className = 'project-actions';
-            const addCategoryBtn = document.createElement('button');
-            addCategoryBtn.type = 'button';
-            addCategoryBtn.textContent = '+ Category';
-            addCategoryBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: null, isLeaf: false });
-            });
-            const addLeafBtn = document.createElement('button');
-            addLeafBtn.type = 'button';
-            addLeafBtn.textContent = '+ Leaf';
-            addLeafBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: null, isLeaf: true });
-            });
-            projectActions.append(addCategoryBtn, addLeafBtn);
-            wrapper.appendChild(projectActions);
-
-            collapseBtn.addEventListener('click', () => {
-              if (!hasChildren) return;
-              if (expanded) {
-                fundingState.expanded.delete(key);
-              } else {
-                fundingState.expanded.add(key);
-              }
-              persistExpansionState(fundingState.selectedBudgetId);
-              renderLedger();
-            });
-
-            const childrenContainer = document.createElement('div');
-            childrenContainer.className = 'ledger-children';
-            if (!expanded) childrenContainer.style.display = 'none';
+            const rows = document.createElement('div');
+            rows.className = 'ledger-rows';
+            if (!expanded) rows.style.display = 'none';
             const categoryChildren = [...(projectNode.children || project.children || [])];
             categoryChildren.sort((a, b) => {
               const an = (a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a.name || '');
@@ -2485,9 +2789,10 @@
               return an.localeCompare(bn);
             });
             categoryChildren.forEach(child => {
-              childrenContainer.appendChild(renderCategory(child, 0));
+              rows.appendChild(renderCategory(child, 0));
             });
-            wrapper.appendChild(childrenContainer);
+            wrapper.appendChild(rows);
+
             return wrapper;
           }
 
@@ -2495,6 +2800,7 @@
             const key = makeKey(category);
             const hasChildren = category.children && category.children.length;
             const expanded = hasChildren ? fundingState.expanded.has(key) : true;
+
             const fragment = document.createDocumentFragment();
 
             const row = document.createElement('div');
@@ -2508,34 +2814,46 @@
             collapseBtn.disabled = !hasChildren;
 
             const nameCol = document.createElement('div');
-            nameCol.className = 'ledger-col name category-name-col';
-            const nameInput = document.createElement('input');
+            nameCol.className = 'ledger-col name';
+            const treeLabel = document.createElement('div');
+            treeLabel.className = `tree-label${category.is_leaf ? ' leaf' : ''}`;
+            treeLabel.dataset.autoGrowHost = '1';
+
+            const nameInput = document.createElement('textarea');
+            nameInput.rows = 1;
             nameInput.value = category.name || '';
             nameInput.placeholder = 'Category name';
             attachEnterCommit(nameInput);
+            setupAutoGrow(nameInput, { maxPercent: 0.5, minWidth: 220, minHeight: 32 });
             nameInput.addEventListener('change', async () => {
               const next = nameInput.value.trim();
               if (!next || next === category.name) {
                 nameInput.value = category.name || '';
+                triggerAutoGrow(nameInput);
                 return;
               }
               await saveCategoryPatch(category.id, { name: next });
+              triggerAutoGrow(nameInput);
             });
-            nameCol.appendChild(nameInput);
+            treeLabel.appendChild(nameInput);
+            const filler = document.createElement('span');
+            filler.className = 'tree-fill';
+            treeLabel.appendChild(filler);
+            nameCol.appendChild(treeLabel);
+            requestAnimationFrame(() => triggerAutoGrow(nameInput));
 
+            const tagCol = document.createElement('div');
+            tagCol.className = 'ledger-col tags';
+            attachTagRow(tagCol, category, { showLabel: false });
+            
             const subtotalCol = document.createElement('div');
-            subtotalCol.className = 'ledger-col subtotal category-amount-col';
+            subtotalCol.className = 'ledger-col subtotal';
             if (category.is_leaf) {
-              const amountWrapper = document.createElement('div');
-              amountWrapper.className = 'category-amount-wrapper';
               const amountInput = document.createElement('input');
               amountInput.type = 'number';
               amountInput.step = '0.01';
-              amountInput.placeholder = 'Amount';
               const hasValue = category.amount_leaf !== null && category.amount_leaf !== undefined;
-              const parsedAmount = hasValue ? Number(category.amount_leaf) : 0;
-              const safeAmount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
-              amountInput.value = hasValue ? safeAmount.toFixed(2) : '';
+              amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
               attachEnterCommit(amountInput);
               amountInput.addEventListener('change', async () => {
                 const raw = amountInput.value.trim();
@@ -2543,69 +2861,54 @@
                 if (raw !== '') {
                   const parsed = Number(raw);
                   if (Number.isNaN(parsed)) {
-                    amountInput.value = safeAmount.toFixed(2);
+                    amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
                     showBanner('Amount must be numeric', 'warn');
-                    hideBanner(1500);
+                    hideBanner(1600);
                     return;
                   }
                   next = Math.round(parsed * 100) / 100;
                 }
-                const current = hasValue
-                  ? Math.round(Number(category.amount_leaf) * 100) / 100
-                  : null;
-                if ((current === null && next === null) || (current !== null && next !== null && Math.abs(current - next) < 0.005)) {
-                  return;
-                }
                 await saveCategoryPatch(category.id, { amount_leaf: next });
               });
-              amountWrapper.appendChild(amountInput);
-              subtotalCol.appendChild(amountWrapper);
+              subtotalCol.appendChild(amountInput);
             } else {
               subtotalCol.textContent = `Subtotal: ${fmtCurrency(category.rollup_amount)}`;
             }
 
             const actionsCol = document.createElement('div');
             actionsCol.className = 'ledger-actions';
-            const inspectBtn = document.createElement('button');
-            inspectBtn.type = 'button';
-            inspectBtn.textContent = 'Inspect';
-            inspectBtn.addEventListener('click', (evt) => {
+
+            const groupBtn = document.createElement('button');
+            groupBtn.type = 'button';
+            groupBtn.textContent = '+ Group';
+            groupBtn.disabled = category.is_leaf;
+            groupBtn.addEventListener('click', (evt) => {
               evt.stopPropagation();
-              openInspectorFor(category);
+              const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
+                id: category.project_id || category.item_project_id,
+                budget_id: fundingState.selectedBudgetId,
+                name: 'Project',
+              };
+              const parentNode = getCategoryNode(category.id) || category;
+              openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: false });
             });
-            actionsCol.appendChild(inspectBtn);
+            actionsCol.appendChild(groupBtn);
 
-            if (!category.is_leaf) {
-              const addChildBtn = document.createElement('button');
-              addChildBtn.type = 'button';
-              addChildBtn.textContent = '+ Child';
-              addChildBtn.addEventListener('click', (evt) => {
-                evt.stopPropagation();
-                const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
-                  id: category.project_id || category.item_project_id,
-                  budget_id: fundingState.selectedBudgetId,
-                  name: 'Project',
-                };
-                const parentNode = getCategoryNode(category.id) || category;
-                openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: false });
-              });
-              actionsCol.appendChild(addChildBtn);
-
-              const addLeafBtn = document.createElement('button');
-              addLeafBtn.type = 'button';
-              addLeafBtn.textContent = '+ Leaf';
-              addLeafBtn.addEventListener('click', (evt) => {
-                evt.stopPropagation();
-                const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
-                  id: category.project_id || category.item_project_id,
-                  budget_id: fundingState.selectedBudgetId,
-                  name: 'Project',
-                };
-                const parentNode = getCategoryNode(category.id) || category;
-                openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: true });
-              });
-              actionsCol.appendChild(addLeafBtn);
-            }
+            const addLeafBtn = document.createElement('button');
+            addLeafBtn.type = 'button';
+            addLeafBtn.textContent = '+ Leaf';
+            addLeafBtn.disabled = category.is_leaf;
+            addLeafBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
+                id: category.project_id || category.item_project_id,
+                budget_id: fundingState.selectedBudgetId,
+                name: 'Project',
+              };
+              const parentNode = getCategoryNode(category.id) || category;
+              openCategoryModal({ projectNode, parentCategory: parentNode, isLeaf: true });
+            });
+            actionsCol.appendChild(addLeafBtn);
 
             const moveBtn = document.createElement('button');
             moveBtn.type = 'button';
@@ -2616,13 +2919,18 @@
             });
             actionsCol.appendChild(moveBtn);
 
-            row.append(collapseBtn, nameCol, subtotalCol, actionsCol);
-            fragment.appendChild(row);
+            const inspectBtn = document.createElement('button');
+            inspectBtn.type = 'button';
+            inspectBtn.className = 'icon-btn';
+            inspectBtn.textContent = 'ℹ';
+            inspectBtn.addEventListener('click', (evt) => {
+              evt.stopPropagation();
+              openInspectorFor(category);
+            });
+            actionsCol.appendChild(inspectBtn);
 
-            const tagHolder = document.createElement('div');
-            tagHolder.className = 'ledger-tags';
-            attachTagRow(tagHolder, category);
-            fragment.appendChild(tagHolder);
+            row.append(collapseBtn, nameCol, tagCol, subtotalCol, actionsCol);
+            fragment.appendChild(row);
 
             collapseBtn.addEventListener('click', () => {
               if (!hasChildren) return;
@@ -2635,19 +2943,19 @@
               renderLedger();
             });
 
-            const childrenContainer = document.createElement('div');
-            childrenContainer.className = 'ledger-children';
-            if (!expanded) childrenContainer.style.display = 'none';
-            const childNodes = [...(category.children || [])];
-            childNodes.sort((a, b) => {
-              const an = (a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a.name || '');
-              const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
-              return an.localeCompare(bn);
-            });
-            childNodes.forEach(child => {
-              childrenContainer.appendChild(renderCategory(child, depth + 1));
-            });
-            if (childNodes.length) {
+            if (hasChildren) {
+              const childrenContainer = document.createElement('div');
+              childrenContainer.className = 'ledger-children';
+              if (!expanded) childrenContainer.style.display = 'none';
+              const childNodes = [...(category.children || [])];
+              childNodes.sort((a, b) => {
+                const an = (a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a.name || '');
+                const bn = (b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b.name || '');
+                return an.localeCompare(bn);
+              });
+              childNodes.forEach(child => {
+                childrenContainer.appendChild(renderCategory(child, depth + 1));
+              });
               fragment.appendChild(childrenContainer);
             }
 
@@ -2658,6 +2966,7 @@
             fundingState.inspector = { open: false, entity: null };
             inspectorEl.classList.add('hidden');
             inspectorEl.innerHTML = '';
+            if (shellEl) shellEl.classList.remove('has-inspector');
           }
 
           async function refreshCurrentBudget() {
@@ -2755,6 +3064,7 @@
           function openInspectorDrawer(node) {
             fundingState.inspector = { open: true, entity: node };
             inspectorEl.classList.remove('hidden');
+            if (shellEl) shellEl.classList.add('has-inspector');
             inspectorEl.innerHTML = '';
             const panel = document.createElement('div');
             panel.className = 'drawer-panel inspector-panel';
