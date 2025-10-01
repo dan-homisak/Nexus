@@ -446,17 +446,8 @@ def api_update_category(
     db: Session = Depends(get_db),
 ):
     try:
-        category = funding.update_category(
-            db,
-            category_id,
-            name=payload.name,
-            description=payload.description,
-            parent_id=payload.parent_id,
-            project_id=payload.project_id,
-            budget_id=payload.budget_id,
-            is_leaf=payload.is_leaf,
-            amount_leaf=payload.amount_leaf,
-        )
+        updates = payload.model_dump(exclude_unset=True)
+        category = funding.update_category(db, category_id, **updates)
     except funding.FundingServiceError as exc:
         _raise_service_error(exc)
     record = funding.get_category(db, category.id, include=set())

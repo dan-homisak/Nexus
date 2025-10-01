@@ -2229,7 +2229,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(patch),
               });
-              await refreshCurrentBudget();
+              await refreshTreeOnly();
             } catch (err) {
               showError(err);
             }
@@ -2280,7 +2280,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(patch),
               });
-              await refreshCurrentBudget();
+              await refreshTreeOnly();
             } catch (err) {
               showError(err);
             }
@@ -2321,7 +2321,7 @@
             return options;
           }
 
-          function openCategoryModal({ projectNode, parentCategory = null, isLeaf = false }) {
+          function openCategoryModal({ projectNode, parentCategory = null }) {
             if (!projectNode) return;
             const parentName = parentCategory
               ? (parentCategory.path_names && parentCategory.path_names.length
@@ -2329,11 +2329,11 @@
                   : parentCategory.name)
               : projectNode.name;
             openFormModal({
-              title: isLeaf ? `New Leaf under ${parentName}` : `New Category under ${parentName}`,
-              submitLabel: isLeaf ? 'Create Leaf' : 'Create Category',
+              title: `New Item under ${parentName}`,
+              submitLabel: 'Create Item',
               fields: [
                 { name: 'name', label: 'Name', required: true, value: '' },
-                ...(isLeaf ? [{ name: 'amount', label: 'Initial amount', type: 'number', value: '0.00' }] : []),
+                { name: 'amount', label: 'Amount', type: 'number', value: '' },
               ],
               onSubmit: async (values, helpers) => {
                 try {
@@ -2342,15 +2342,17 @@
                     project_id: projectNode.id,
                     budget_id: projectNode.budget_id || fundingState.selectedBudgetId,
                     parent_id: parentCategory ? parentCategory.id : null,
-                    is_leaf: !!isLeaf,
-                    amount_leaf: isLeaf ? Number(values.amount || 0) : null,
+                    is_leaf: true,
+                    amount_leaf: values.amount !== '' && values.amount !== null && values.amount !== undefined
+                      ? Number(values.amount)
+                      : null,
                     description: null,
                   };
-                  if (isLeaf && Number.isNaN(payload.amount_leaf)) {
-                    helpers.setError('Amount must be a number.');
-                    return;
-                  }
-                  if (isLeaf && payload.amount_leaf !== null) {
+                  if (payload.amount_leaf !== null) {
+                    if (Number.isNaN(payload.amount_leaf)) {
+                      helpers.setError('Amount must be a number.');
+                      return;
+                    }
                     payload.amount_leaf = Math.round(payload.amount_leaf * 100) / 100;
                   }
                   await apiCreate('/api/categories', payload);
@@ -2367,7 +2369,7 @@
                   }
                   showBanner('Category created', 'success');
                   hideBanner(1500);
-                  await refreshCurrentBudget();
+                  await refreshTreeOnly();
                 } catch (err) {
                   helpers.setError(err?.message || String(err));
                 }
@@ -2639,7 +2641,7 @@
               key,
               type: entity.type,
               label: entity.name || '',
-              isLeaf: entity.type === 'category' ? (!!entity.is_leaf && !hasChildren) : false,
+              isLeaf: entity.type === 'category' ? !hasChildren : false,
               data: entity,
             };
             if (children.length) node.children = children;
@@ -2657,8 +2659,12 @@
           function decorateTreeRow(ctx) {
             if (!ctx || !ctx.node) return;
             const { node, row, main, end } = ctx;
+            const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+            if (node.type === 'category') {
+              node.isLeaf = !hasChildren;
+            }
             row.dataset.type = node.type || '';
-            row.dataset.leaf = String(node.type === 'category' && node.data && node.data.is_leaf);
+            row.dataset.leaf = String(node.type === 'category' ? !hasChildren : false);
             main.innerHTML = '';
             end.innerHTML = '';
 
@@ -2691,6 +2697,10 @@
             topLine.className = 'tv__line';
             main.appendChild(topLine);
 
+            const topLineMain = document.createElement('div');
+            topLineMain.className = 'tv__lineMain';
+            topLine.appendChild(topLineMain);
+
             const nameInput = document.createElement('textarea');
             nameInput.rows = 1;
             nameInput.value = project.name || '';
@@ -2710,20 +2720,23 @@
               triggerAutoGrow(nameInput);
             });
             const nameField = makeInlineField('Item/Project', nameInput);
-            topLine.appendChild(nameField);
+            topLineMain.appendChild(nameField);
             requestAnimationFrame(() => triggerAutoGrow(nameInput));
 
             const subtotal = document.createElement('span');
             subtotal.className = 'tv__meta';
             subtotal.textContent = `Subtotal: ${fmtCurrency(project.rollup_amount || 0)}`;
-            topLine.appendChild(subtotal);
+            const projectAmountWrap = document.createElement('div');
+            projectAmountWrap.className = 'tv__amountWrap';
+            projectAmountWrap.appendChild(subtotal);
+            topLine.appendChild(projectAmountWrap);
 
             const tagBox = document.createElement('div');
-            tagBox.className = 'tv__tagRegion';
+            tagBox.className = 'tv__tagsWrap';
             tagBox.dataset.tvStopToggle = '1';
             tagBox.dataset.tvStopNav = '1';
             attachTagRow(tagBox, projectNode, { showLabel: false });
-            main.appendChild(tagBox);
+            topLineMain.appendChild(tagBox);
 
             const assetRow = document.createElement('div');
             assetRow.className = 'tv__assetScroll';
@@ -2787,27 +2800,16 @@
             assetRow.appendChild(addAssetBtn);
             main.appendChild(assetRow);
 
-            const groupBtn = document.createElement('button');
-            groupBtn.type = 'button';
-            groupBtn.textContent = '+ Group';
-            groupBtn.dataset.tvStopToggle = '1';
-            groupBtn.dataset.tvStopNav = '1';
-            groupBtn.addEventListener('click', (evt) => {
+            const addItemBtn = document.createElement('button');
+            addItemBtn.type = 'button';
+            addItemBtn.textContent = '+ Item';
+            addItemBtn.dataset.tvStopToggle = '1';
+            addItemBtn.dataset.tvStopNav = '1';
+            addItemBtn.addEventListener('click', (evt) => {
               evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: null, isLeaf: false });
+              openCategoryModal({ projectNode, parentCategory: null });
             });
-            end.appendChild(groupBtn);
-
-            const leafBtn = document.createElement('button');
-            leafBtn.type = 'button';
-            leafBtn.textContent = '+ Leaf';
-            leafBtn.dataset.tvStopToggle = '1';
-            leafBtn.dataset.tvStopNav = '1';
-            leafBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: null, isLeaf: true });
-            });
-            end.appendChild(leafBtn);
+            end.appendChild(addItemBtn);
 
             const inspectBtn = document.createElement('button');
             inspectBtn.type = 'button';
@@ -2823,15 +2825,23 @@
           }
 
           function renderTreeCategoryRow(ctx) {
-            const { node, main, end } = ctx;
+            const { node, row, main, end } = ctx;
             const category = node.data;
-            const isLeaf = node.isLeaf === true;
+            const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+            const isLeaf = !hasChildren;
+            row.dataset.leaf = String(isLeaf);
 
             main.classList.add('tv__mainStack');
 
             const line = document.createElement('div');
             line.className = 'tv__line';
+            line.dataset.tvStopToggle = '1';
+            line.dataset.tvStopNav = '1';
             main.appendChild(line);
+
+            const lineMain = document.createElement('div');
+            lineMain.className = 'tv__lineMain';
+            line.appendChild(lineMain);
 
             const nameInput = document.createElement('textarea');
             nameInput.rows = 1;
@@ -2851,10 +2861,21 @@
               await saveCategoryPatch(category.id, { name: next });
               triggerAutoGrow(nameInput);
             });
-            const labelText = isLeaf ? 'Leaf' : 'Group';
+            const labelText = isLeaf ? 'Item' : 'Item (rollup)';
             const nameField = makeInlineField(labelText, nameInput);
-            line.appendChild(nameField);
+            lineMain.appendChild(nameField);
             requestAnimationFrame(() => triggerAutoGrow(nameInput));
+
+            const tagBox = document.createElement('div');
+            tagBox.className = 'tv__tagsWrap';
+            tagBox.dataset.tvStopToggle = '1';
+            tagBox.dataset.tvStopNav = '1';
+            attachTagRow(tagBox, category, { showLabel: false });
+            lineMain.appendChild(tagBox);
+
+            const amountWrap = document.createElement('div');
+            amountWrap.className = 'tv__amountWrap';
+            line.appendChild(amountWrap);
 
             if (isLeaf) {
               const amountInput = document.createElement('input');
@@ -2882,20 +2903,13 @@
                 await saveCategoryPatch(category.id, { amount_leaf: next });
               });
               const amountField = makeInlineField('Amount', amountInput);
-              line.appendChild(amountField);
+              amountWrap.appendChild(amountField);
             } else {
               const subtotal = document.createElement('span');
               subtotal.className = 'tv__meta';
               subtotal.textContent = `Subtotal: ${fmtCurrency(category.rollup_amount || 0)}`;
-              line.appendChild(subtotal);
+              amountWrap.appendChild(subtotal);
             }
-
-            const tagBox = document.createElement('div');
-            tagBox.className = 'tv__tagRegion';
-            tagBox.dataset.tvStopToggle = '1';
-            tagBox.dataset.tvStopNav = '1';
-            attachTagRow(tagBox, category, { showLabel: false });
-            main.appendChild(tagBox);
 
             const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
               id: category.project_id || category.item_project_id,
@@ -2908,31 +2922,16 @@
             end.dataset.tvStopToggle = '1';
             end.dataset.tvStopNav = '1';
 
-            const groupBtn = document.createElement('button');
-            groupBtn.type = 'button';
-            groupBtn.textContent = '+ Group';
-            groupBtn.disabled = isLeaf;
-            groupBtn.dataset.tvStopToggle = '1';
-            groupBtn.dataset.tvStopNav = '1';
-            groupBtn.addEventListener('click', (evt) => {
+            const addNestedBtn = document.createElement('button');
+            addNestedBtn.type = 'button';
+            addNestedBtn.textContent = '+ Item';
+            addNestedBtn.dataset.tvStopToggle = '1';
+            addNestedBtn.dataset.tvStopNav = '1';
+            addNestedBtn.addEventListener('click', (evt) => {
               evt.stopPropagation();
-              if (isLeaf) return;
-              openCategoryModal({ projectNode, parentCategory: categoryNode, isLeaf: false });
+              openCategoryModal({ projectNode, parentCategory: categoryNode });
             });
-            end.appendChild(groupBtn);
-
-            const leafBtn = document.createElement('button');
-            leafBtn.type = 'button';
-            leafBtn.textContent = '+ Leaf';
-            leafBtn.disabled = isLeaf;
-            leafBtn.dataset.tvStopToggle = '1';
-            leafBtn.dataset.tvStopNav = '1';
-            leafBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              if (isLeaf) return;
-              openCategoryModal({ projectNode, parentCategory: categoryNode, isLeaf: true });
-            });
-            end.appendChild(leafBtn);
+            end.appendChild(addNestedBtn);
 
             const moveBtn = document.createElement('button');
             moveBtn.type = 'button';
@@ -3035,6 +3034,11 @@
             fundingState.lineAssetCache.clear();
             await loadBudgets(fundingState.searchTerm);
             renderBudgetList();
+            await loadBudgetTree(fundingState.selectedBudgetId);
+          }
+
+          async function refreshTreeOnly() {
+            if (!fundingState.selectedBudgetId) return;
             await loadBudgetTree(fundingState.selectedBudgetId);
           }
 

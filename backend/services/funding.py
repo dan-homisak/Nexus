@@ -23,6 +23,7 @@ class FundingServiceError(ValueError):
 
 TagBundle = Dict[str, List[Dict[str, Any]]]
 IncludeSet = Set[str]
+_UNSET = object()
 
 
 def _float(value: Optional[Decimal]) -> Optional[float]:
@@ -510,6 +511,33 @@ def _mark_parent_has_children(parent: Optional[models.Category]) -> None:
         parent.amount_leaf = None
 
 
+def _sum_child_rollups(db: Session, parent_id: int) -> Decimal:
+    total = db.execute(
+        select(func.coalesce(func.sum(models.Category.rollup_amount), 0)).where(
+            models.Category.parent_id == parent_id
+        )
+    ).scalar()
+    if total is None:
+        return Decimal("0")
+    if isinstance(total, Decimal):
+        return total
+    return Decimal(str(total))
+
+
+def _recalculate_rollup_chain(db: Session, category: Optional[models.Category]) -> None:
+    current = category
+    visited: Set[int] = set()
+    while current is not None and current.id not in visited:
+        visited.add(current.id)
+        if current.is_leaf:
+            current.rollup_amount = current.amount_leaf or Decimal("0")
+        else:
+            current.rollup_amount = _sum_child_rollups(db, current.id)
+        if current.parent_id is None:
+            break
+        current = db.get(models.Category, current.parent_id)
+
+
 def _refresh_parent_leaf_state(db: Session, parent_id: Optional[int]) -> None:
     if parent_id is None:
         return
@@ -526,6 +554,7 @@ def _refresh_parent_leaf_state(db: Session, parent_id: Optional[int]) -> None:
     else:
         parent.is_leaf = False
         parent.amount_leaf = None
+    _recalculate_rollup_chain(db, parent)
 
 
 def create_category(
@@ -540,10 +569,29 @@ def create_category(
     description: Optional[str],
 ) -> models.Category:
     parent = _validate_parent(db, parent_id, project_id, budget_id)
+
+    parent_was_leaf = False
+    transferred_amount = Decimal("0")
+
+    if parent:
+        if parent.is_leaf:
+            parent_was_leaf = True
+            transferred_amount = parent.amount_leaf or Decimal("0")
+            parent.is_leaf = False
+            parent.amount_leaf = None
+        else:
+            transferred_amount = Decimal("0")
+
     if not is_leaf:
         amount_leaf = None
-    elif amount_leaf is not None and not isinstance(amount_leaf, Decimal):
-        amount_leaf = Decimal(str(amount_leaf))
+    elif amount_leaf is not None:
+        if not isinstance(amount_leaf, Decimal):
+            amount_leaf = Decimal(str(amount_leaf))
+    elif parent_was_leaf:
+        amount_leaf = transferred_amount
+    else:
+        amount_leaf = Decimal("0")
+
     category = models.Category(
         name=name,
         project_id=project_id,
@@ -553,8 +601,15 @@ def create_category(
         amount_leaf=amount_leaf,
         description=description,
     )
+    if category.is_leaf:
+        category.rollup_amount = category.amount_leaf or Decimal("0")
+    else:
+        category.rollup_amount = Decimal("0")
+
     db.add(category)
+    db.flush()
     _mark_parent_has_children(parent)
+    _recalculate_rollup_chain(db, category)
     db.commit()
     db.refresh(category)
     return category
@@ -572,7 +627,7 @@ def update_category(
     *,
     name: Optional[str] = None,
     description: Optional[str] = None,
-    parent_id: Optional[int] = None,
+    parent_id: Any = _UNSET,
     project_id: Optional[int] = None,
     budget_id: Optional[int] = None,
     is_leaf: Optional[bool] = None,
@@ -586,7 +641,7 @@ def update_category(
     target_budget = budget_id if budget_id is not None else category.budget_id
 
     # Parent change
-    if parent_id is not None and parent_id != category.parent_id:
+    if parent_id is not _UNSET and parent_id is not None and parent_id != category.parent_id:
         if parent_id == category.id:
             raise FundingServiceError("category cannot be its own parent", code="invalid_parent")
         _assert_no_subtree_allocations(db, category_id)
@@ -596,7 +651,7 @@ def update_category(
         db.flush()
         _mark_parent_has_children(new_parent)
         _refresh_parent_leaf_state(db, old_parent_id)
-    elif parent_id is None and category.parent_id is not None:
+    elif parent_id is not _UNSET and parent_id is None and category.parent_id is not None:
         _assert_no_subtree_allocations(db, category_id)
         old_parent_id = category.parent_id
         category.parent_id = None
@@ -641,17 +696,22 @@ def update_category(
             elif not isinstance(amount_leaf, Decimal):
                 amount_leaf = Decimal(str(amount_leaf))
             category.amount_leaf = amount_leaf
+            category.rollup_amount = amount_leaf
         else:
             category.amount_leaf = None
+            category.rollup_amount = Decimal("0")
         category.is_leaf = is_leaf
     elif is_leaf or category.is_leaf:
         if amount_leaf is not None:
             if not isinstance(amount_leaf, Decimal):
                 amount_leaf = Decimal(str(amount_leaf))
             category.amount_leaf = amount_leaf
+            category.rollup_amount = amount_leaf
 
-    db.commit()
+    db.flush()
+    _recalculate_rollup_chain(db, category)
     _refresh_parent_leaf_state(db, category.parent_id)
+    db.commit()
     db.refresh(category)
     return category
 
@@ -665,8 +725,9 @@ def delete_category(db: Session, category_id: int) -> None:
     ids = _subtree_category_ids(db, category_id)
     clause, params = _build_in_clause("cat_del", ids)
     db.execute(text(f"DELETE FROM categories WHERE id IN ({clause})"), params)
-    db.commit()
+    db.flush()
     _refresh_parent_leaf_state(db, parent_id)
+    db.commit()
 
 
 def can_move_category(db: Session, category_id: int, *, new_parent_id: Optional[int]) -> Dict[str, Any]:
