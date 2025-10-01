@@ -81,7 +81,7 @@ def seed():
             entity_type="purchase_order",
             entity_id=str(po.id),
             event_type="po_issued",
-            at=dt.datetime.utcnow(),
+            at=dt.datetime.now(dt.timezone.utc),
             by="seed",
             payload_json={"po_number": po.po_number},
         )

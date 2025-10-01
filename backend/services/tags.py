@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import distinct, func, select, text
@@ -145,7 +145,7 @@ def create_tag(
     if existing:
         raise TagServiceError("tag name already exists")
     tag = models.Tag(name=normalized, color=color, description=description)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if getattr(tag, "created_at", None) is None:
         tag.created_at = now
     if getattr(tag, "updated_at", None) is None:
@@ -185,7 +185,7 @@ def update_tag(
         changed = True
     if not changed:
         return tag
-    tag.updated_at = datetime.utcnow()
+    tag.updated_at = datetime.now(timezone.utc)
     _log_audit(
         db,
         event_type="tag.update",
@@ -923,7 +923,7 @@ def rebuild_effective_tags(
 ) -> models.BackgroundJob:
     scope = _parse_scope_token(only_for)
     job = models.BackgroundJob(kind="rebuild_effective_tags", status="running")
-    job.started_at = datetime.utcnow()
+    job.started_at = datetime.now(timezone.utc)
     if only_for:
         job.payload = json.dumps({"scope": only_for})
     db.add(job)
@@ -940,8 +940,8 @@ def rebuild_effective_tags(
     try:
         inserted = _run_rebuild(db, scope)
         job.status = "success"
-        job.finished_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        job.finished_at = datetime.now(timezone.utc)
+        job.updated_at = datetime.now(timezone.utc)
         _log_audit(
             db,
             event_type="job.finish",
@@ -953,8 +953,8 @@ def rebuild_effective_tags(
     except Exception as exc:  # pragma: no cover - surfaced in tests as failure
         job.status = "error"
         job.error = str(exc)
-        job.finished_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
+        job.finished_at = datetime.now(timezone.utc)
+        job.updated_at = datetime.now(timezone.utc)
         _log_audit(
             db,
             event_type="job.error",

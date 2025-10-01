@@ -8,10 +8,20 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+try:
+    from backend.migrations.versions.dde21381ed8c_pr2_journals_immutability import TRIGGERS
+except ModuleNotFoundError as exc:
+    pytest.skip(f"migration dependencies missing ({exc})", allow_module_level=True)
+
+try:
+    import pandas  # noqa: F401
+except ModuleNotFoundError as exc:
+    pytest.skip(f"pandas dependency missing ({exc})", allow_module_level=True)
+
+from backend.main import _create_journal, _serialize_journal, journal_adjust, journal_reallocate, update_entry
+
 from backend.db import Base
 from backend import models, models_finance, schemas
-from backend.main import _create_journal, _serialize_journal, journal_adjust, journal_reallocate, update_entry
-from backend.migrations.versions.dde21381ed8c_pr2_journals_immutability import TRIGGERS
 
 
 def make_session_factory():

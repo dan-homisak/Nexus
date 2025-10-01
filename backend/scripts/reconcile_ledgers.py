@@ -87,7 +87,7 @@ def reconcile_ledgers(session: Session) -> dict:
                 budget.budget_amount_cache = None
             else:
                 budget.budget_amount_cache = total
-            budget.updated_at = dt.datetime.utcnow()
+            budget.updated_at = dt.datetime.now(dt.timezone.utc)
         updated_budgets[budget_id] = total
 
     session.commit()

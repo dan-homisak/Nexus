@@ -368,7 +368,7 @@ class Event(Base):
     entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
     entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, nullable=False)
+    at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     by: Mapped[Optional[str]] = mapped_column(String(100))
     payload_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON)
 
@@ -383,8 +383,8 @@ class ReportDefinition(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     owner: Mapped[str] = mapped_column(String(100), nullable=False)
     json_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, nullable=False)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, onupdate=func.now(), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<ReportDefinition id={self.id} name={self.name!r}>"
@@ -408,7 +408,7 @@ class Transaction(Base):
     txn_date: Mapped[dt.date] = mapped_column(Date, default=dt.date.today, nullable=False)
     memo: Mapped[Optional[str]] = mapped_column(Text)
     tags: Mapped[Optional[list[str]]] = mapped_column(JSON)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     reverses_transaction_id: Mapped[Optional[str]] = mapped_column(ForeignKey("transactions.id"))
     reversed_by_transaction_id: Mapped[Optional[str]] = mapped_column(String(36), unique=True)
 

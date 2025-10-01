@@ -123,7 +123,7 @@ def backfill_transactions(session: Session, *, dry_run: bool = False) -> dict[st
             entity_type="transaction",
             entity_id=txn.id,
             event_type="backfill_created",
-            at=dt.datetime.utcnow(),
+            at=dt.datetime.now(dt.timezone.utc),
             by="system",
             payload_json={"entry_id": entry.id, "kind": entry.kind},
         )

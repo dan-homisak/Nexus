@@ -2593,37 +2593,45 @@
             const treeHolder = document.createElement('div');
             treeHolder.className = 'ledger-tree-host';
 
-            const treeEl = document.createElement('ul');
-            treeEl.id = 'tree';
-            treeEl.className = 'tv';
-            treeEl.setAttribute('role', 'tree');
-            treeEl.setAttribute('aria-label', 'Budget items');
-
+            const treeEl = document.createElement('div');
+            treeEl.id = 'budgetTree';
             treeHolder.appendChild(treeEl);
             body.appendChild(treeHolder);
             ledgerEl.appendChild(body);
 
-            if (!window.TreeView || typeof window.TreeView.renderTree !== 'function') {
-              treeEl.innerHTML = '<li>TreeView component missing.</li>';
-              return;
-            }
-
             const nodes = buildTreeNodes(hierarchy.children || []);
-            window.TreeView.renderTree(treeEl, nodes, {
-              getExpanded: (node) => (node && node.children && node.children.length)
-                ? fundingState.expanded.has(node.key)
-                : false,
-              setExpanded: (node, expand) => {
-                if (!node || !node.children || !node.children.length) return;
-                if (expand) {
-                  fundingState.expanded.add(node.key);
-                } else {
-                  fundingState.expanded.delete(node.key);
-                }
-                persistExpansionState(fundingState.selectedBudgetId);
-              },
-              decorateRow: decorateTreeRow,
-            });
+            const expandedKeys = Array.from(fundingState.expanded);
+            const actions = {
+              fmtCurrency,
+              saveProjectPatch,
+              saveCategoryPatch,
+              openCategoryModal,
+              openMoveCategoryModal,
+              openInspector: openInspectorFor,
+              openAssetModal,
+              detachAssetFromProject,
+              attachTagRow,
+              getProjectNode,
+              getCategoryNode,
+              refreshTreeOnly,
+              showError,
+            };
+            const onToggle = (node, expand) => {
+              const key = node?.key;
+              if (!key) return;
+              if (expand) {
+                fundingState.expanded.add(key);
+              } else {
+                fundingState.expanded.delete(key);
+              }
+              persistExpansionState(fundingState.selectedBudgetId);
+            };
+
+            if (window.BudgetTreeReact && typeof window.BudgetTreeReact.render === 'function') {
+              window.BudgetTreeReact.render(treeEl, { nodes, expandedKeys, onToggle, actions });
+            } else {
+              treeEl.textContent = 'Tree component not available';
+            }
           }
 
           function buildTreeNodes(projects = []) {
@@ -2654,307 +2662,6 @@
               const bn = (b && b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b && b.name ? b.name : '');
               return an.localeCompare(bn);
             });
-          }
-
-          function decorateTreeRow(ctx) {
-            if (!ctx || !ctx.node) return;
-            const { node, row, main, end } = ctx;
-            const hasChildren = Array.isArray(node.children) && node.children.length > 0;
-            if (node.type === 'category') {
-              node.isLeaf = !hasChildren;
-            }
-            row.dataset.type = node.type || '';
-            row.dataset.leaf = String(node.type === 'category' ? !hasChildren : false);
-            main.innerHTML = '';
-            end.innerHTML = '';
-
-            if (node.type === 'project') {
-              renderTreeProjectRow(ctx);
-            } else if (node.type === 'category') {
-              renderTreeCategoryRow(ctx);
-            } else {
-              const title = document.createElement('span');
-              title.className = 'tv__title';
-              title.textContent = node.label || '';
-              main.appendChild(title);
-            }
-          }
-
-          function renderTreeProjectRow(ctx) {
-            const { node, main, end, toggle } = ctx;
-            const project = node.data;
-            const projectNode = getProjectNode(project.id) || project;
-
-            main.classList.add('tv__mainStack');
-
-            end.classList.add('ledger-actions');
-            end.dataset.tvStopToggle = '1';
-            end.dataset.tvStopNav = '1';
-
-            toggle.setAttribute('aria-label', node.children && node.children.length ? 'Toggle project' : 'No children');
-
-            const topLine = document.createElement('div');
-            topLine.className = 'tv__line';
-            main.appendChild(topLine);
-
-            const topLineMain = document.createElement('div');
-            topLineMain.className = 'tv__lineMain';
-            topLine.appendChild(topLineMain);
-
-            const nameInput = document.createElement('textarea');
-            nameInput.rows = 1;
-            nameInput.value = project.name || '';
-            nameInput.placeholder = 'Project name';
-            nameInput.dataset.tvStopToggle = '1';
-            nameInput.dataset.tvStopNav = '1';
-            attachEnterCommit(nameInput);
-            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 280, minHeight: 32 });
-            nameInput.addEventListener('change', async () => {
-              const next = nameInput.value.trim();
-              if (!next || next === project.name) {
-                nameInput.value = project.name || '';
-                triggerAutoGrow(nameInput);
-                return;
-              }
-              await saveProjectPatch(project.id, { name: next });
-              triggerAutoGrow(nameInput);
-            });
-            const nameField = makeInlineField('Item/Project', nameInput);
-            topLineMain.appendChild(nameField);
-            requestAnimationFrame(() => triggerAutoGrow(nameInput));
-
-            const subtotal = document.createElement('span');
-            subtotal.className = 'tv__meta';
-            subtotal.textContent = `Subtotal: ${fmtCurrency(project.rollup_amount || 0)}`;
-            const projectAmountWrap = document.createElement('div');
-            projectAmountWrap.className = 'tv__amountWrap';
-            projectAmountWrap.appendChild(subtotal);
-            topLine.appendChild(projectAmountWrap);
-
-            const tagBox = document.createElement('div');
-            tagBox.className = 'tv__tagsWrap';
-            tagBox.dataset.tvStopToggle = '1';
-            tagBox.dataset.tvStopNav = '1';
-            attachTagRow(tagBox, projectNode, { showLabel: false });
-            topLineMain.appendChild(tagBox);
-
-            const assetRow = document.createElement('div');
-            assetRow.className = 'tv__assetScroll';
-            assetRow.dataset.tvStopToggle = '1';
-            assetRow.dataset.tvStopNav = '1';
-            const assetLabel = document.createElement('span');
-            assetLabel.className = 'tv__meta';
-            assetLabel.textContent = 'Assets:';
-            assetRow.appendChild(assetLabel);
-
-            const assetList = document.createElement('div');
-            assetList.className = 'asset-chip-row';
-            assetRow.appendChild(assetList);
-
-            const assetItems = (project.assets && project.assets.items) ? project.assets.items : [];
-            if (assetItems.length) {
-              assetItems.forEach(asset => {
-                const chip = document.createElement('span');
-                chip.className = 'asset-chip';
-                chip.textContent = asset.name;
-                chip.dataset.tvStopToggle = '1';
-                chip.dataset.tvStopNav = '1';
-
-                const removeBtn = document.createElement('button');
-                removeBtn.type = 'button';
-                removeBtn.className = 'asset-chip-remove';
-                removeBtn.textContent = '×';
-                removeBtn.title = 'Remove asset';
-                removeBtn.dataset.tvStopToggle = '1';
-                removeBtn.dataset.tvStopNav = '1';
-                removeBtn.addEventListener('click', async (evt) => {
-                  evt.stopPropagation();
-                  try {
-                    await detachAssetFromProject(project.id, asset.id);
-                    await refreshCurrentBudget();
-                  } catch (err) {
-                    showError(err);
-                  }
-                });
-                chip.appendChild(removeBtn);
-                assetList.appendChild(chip);
-              });
-            } else {
-              const empty = document.createElement('span');
-              empty.className = 'asset-empty';
-              empty.textContent = 'None';
-              empty.dataset.tvStopToggle = '1';
-              assetList.appendChild(empty);
-            }
-
-            const addAssetBtn = document.createElement('button');
-            addAssetBtn.type = 'button';
-            addAssetBtn.className = 'asset-add-btn';
-            addAssetBtn.textContent = '+ Asset';
-            addAssetBtn.dataset.tvStopToggle = '1';
-            addAssetBtn.dataset.tvStopNav = '1';
-            addAssetBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openAssetModal(projectNode);
-            });
-            assetRow.appendChild(addAssetBtn);
-            main.appendChild(assetRow);
-
-            const addItemBtn = document.createElement('button');
-            addItemBtn.type = 'button';
-            addItemBtn.textContent = '+ Item';
-            addItemBtn.dataset.tvStopToggle = '1';
-            addItemBtn.dataset.tvStopNav = '1';
-            addItemBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: null });
-            });
-            end.appendChild(addItemBtn);
-
-            const inspectBtn = document.createElement('button');
-            inspectBtn.type = 'button';
-            inspectBtn.className = 'icon-btn';
-            inspectBtn.textContent = 'ℹ';
-            inspectBtn.dataset.tvStopToggle = '1';
-            inspectBtn.dataset.tvStopNav = '1';
-            inspectBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openInspectorFor(project);
-            });
-            end.appendChild(inspectBtn);
-          }
-
-          function renderTreeCategoryRow(ctx) {
-            const { node, row, main, end } = ctx;
-            const category = node.data;
-            const hasChildren = Array.isArray(node.children) && node.children.length > 0;
-            const isLeaf = !hasChildren;
-            row.dataset.leaf = String(isLeaf);
-
-            main.classList.add('tv__mainStack');
-
-            const line = document.createElement('div');
-            line.className = 'tv__line';
-            line.dataset.tvStopToggle = '1';
-            line.dataset.tvStopNav = '1';
-            main.appendChild(line);
-
-            const lineMain = document.createElement('div');
-            lineMain.className = 'tv__lineMain';
-            line.appendChild(lineMain);
-
-            const nameInput = document.createElement('textarea');
-            nameInput.rows = 1;
-            nameInput.value = category.name || '';
-            nameInput.placeholder = 'Category name';
-            nameInput.dataset.tvStopToggle = '1';
-            nameInput.dataset.tvStopNav = '1';
-            attachEnterCommit(nameInput);
-            setupAutoGrow(nameInput, { maxPercent: 0.75, minWidth: 220, minHeight: 32 });
-            nameInput.addEventListener('change', async () => {
-              const next = nameInput.value.trim();
-              if (!next || next === category.name) {
-                nameInput.value = category.name || '';
-                triggerAutoGrow(nameInput);
-                return;
-              }
-              await saveCategoryPatch(category.id, { name: next });
-              triggerAutoGrow(nameInput);
-            });
-            const labelText = isLeaf ? 'Item' : 'Item (rollup)';
-            const nameField = makeInlineField(labelText, nameInput);
-            lineMain.appendChild(nameField);
-            requestAnimationFrame(() => triggerAutoGrow(nameInput));
-
-            const tagBox = document.createElement('div');
-            tagBox.className = 'tv__tagsWrap';
-            tagBox.dataset.tvStopToggle = '1';
-            tagBox.dataset.tvStopNav = '1';
-            attachTagRow(tagBox, category, { showLabel: false });
-            lineMain.appendChild(tagBox);
-
-            const amountWrap = document.createElement('div');
-            amountWrap.className = 'tv__amountWrap';
-            line.appendChild(amountWrap);
-
-            if (isLeaf) {
-              const amountInput = document.createElement('input');
-              amountInput.type = 'number';
-              amountInput.step = '0.01';
-              amountInput.inputMode = 'decimal';
-              const hasValue = category.amount_leaf !== null && category.amount_leaf !== undefined;
-              amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
-              amountInput.placeholder = '0.00';
-              amountInput.dataset.tvStopToggle = '1';
-              amountInput.dataset.tvStopNav = '1';
-              amountInput.addEventListener('change', async () => {
-                const raw = amountInput.value.trim();
-                let next = null;
-                if (raw !== '') {
-                  const parsed = Number(raw);
-                  if (Number.isNaN(parsed)) {
-                    amountInput.value = hasValue ? Number(category.amount_leaf).toFixed(2) : '';
-                    showBanner('Amount must be numeric', 'warn');
-                    hideBanner(1600);
-                    return;
-                  }
-                  next = Math.round(parsed * 100) / 100;
-                }
-                await saveCategoryPatch(category.id, { amount_leaf: next });
-              });
-              const amountField = makeInlineField('Amount', amountInput);
-              amountWrap.appendChild(amountField);
-            } else {
-              const subtotal = document.createElement('span');
-              subtotal.className = 'tv__meta';
-              subtotal.textContent = `Subtotal: ${fmtCurrency(category.rollup_amount || 0)}`;
-              amountWrap.appendChild(subtotal);
-            }
-
-            const projectNode = getProjectNode(category.project_id || category.item_project_id) || {
-              id: category.project_id || category.item_project_id,
-              budget_id: fundingState.selectedBudgetId,
-              name: 'Project',
-            };
-            const categoryNode = getCategoryNode(category.id) || category;
-
-            end.classList.add('ledger-actions');
-            end.dataset.tvStopToggle = '1';
-            end.dataset.tvStopNav = '1';
-
-            const addNestedBtn = document.createElement('button');
-            addNestedBtn.type = 'button';
-            addNestedBtn.textContent = '+ Item';
-            addNestedBtn.dataset.tvStopToggle = '1';
-            addNestedBtn.dataset.tvStopNav = '1';
-            addNestedBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openCategoryModal({ projectNode, parentCategory: categoryNode });
-            });
-            end.appendChild(addNestedBtn);
-
-            const moveBtn = document.createElement('button');
-            moveBtn.type = 'button';
-            moveBtn.textContent = 'Move';
-            moveBtn.dataset.tvStopToggle = '1';
-            moveBtn.dataset.tvStopNav = '1';
-            moveBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openMoveCategoryModal(categoryNode);
-            });
-            end.appendChild(moveBtn);
-
-            const inspectBtn = document.createElement('button');
-            inspectBtn.type = 'button';
-            inspectBtn.className = 'icon-btn';
-            inspectBtn.textContent = 'ℹ';
-            inspectBtn.dataset.tvStopToggle = '1';
-            inspectBtn.dataset.tvStopNav = '1';
-            inspectBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openInspectorFor(category);
-            });
-            end.appendChild(inspectBtn);
           }
 
           function openItemProjectModal(budget) {

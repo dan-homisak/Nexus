@@ -59,7 +59,7 @@ def _emit_event(
         event_type=event_type,
         by=by,
         payload_json=payload or {},
-        at=dt.datetime.utcnow(),
+        at=dt.datetime.now(dt.timezone.utc),
     )
     session.add(event)
     session.flush()
@@ -1394,7 +1394,7 @@ def run_report(report_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Report missing view name in json_config")
     ensure_views(db.bind)
     rows = [dict(r._mapping) for r in db.execute(text(f"SELECT * FROM {view_name}"))]
-    return SavedReportResult(rows=rows, generated_at=dt.datetime.utcnow())
+    return SavedReportResult(rows=rows, generated_at=dt.datetime.now(dt.timezone.utc))
 
 
 @router.post("/report/run", response_model=SavedReportResult)
@@ -1404,4 +1404,4 @@ def run_report_adhoc(payload: ReportRunIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="json_config.view is required")
     ensure_views(db.bind)
     rows = [dict(r._mapping) for r in db.execute(text(f"SELECT * FROM {view_name}"))]
-    return SavedReportResult(rows=rows, generated_at=dt.datetime.utcnow())
+    return SavedReportResult(rows=rows, generated_at=dt.datetime.now(dt.timezone.utc))
