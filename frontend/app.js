@@ -1206,6 +1206,168 @@
           fundingState.budgetMap.forEach(budget => remove(budget.tags));
         }
 
+        function attachTagRow(container, node, { showLabel = false } = {}) {
+          const scope = { entity_type: toScopeType(node.type), entity_id: node.id, type: node.type };
+          if (container.__tagObserver) container.__tagObserver.disconnect();
+          if (container.__tagOutside) {
+            document.removeEventListener('mousedown', container.__tagOutside, true);
+          }
+          container.innerHTML = '';
+          container.classList.add('tag-region');
+          container.style.position = 'relative';
+
+          const listEl = document.createElement('div');
+          listEl.className = 'tag-list';
+          container.appendChild(listEl);
+
+          const addBtn = document.createElement('button');
+          addBtn.type = 'button';
+          addBtn.className = 'tag-add';
+          addBtn.textContent = '+ Add tag';
+          container.appendChild(addBtn);
+
+          const tags = node.tags || { direct: [], inherited: [] };
+          const directIds = new Set((tags.direct || []).map(t => t.id));
+          const tagModels = [
+            ...(tags.direct || []).map(tag => ({ ...tag, inherited: false })),
+            ...(tags.inherited || []).map(tag => ({ ...tag, inherited: true })),
+          ];
+
+          const buildPill = (tag) => {
+            const label = `#${tag.name}`;
+            const pill = document.createElement('span');
+            pill.className = 'tag-pill';
+            pill.dataset.inherited = tag.inherited ? '1' : '0';
+            pill.tabIndex = 0;
+            pill.setAttribute('role', 'button');
+            pill.title = label;
+
+            const labelEl = document.createElement('span');
+            labelEl.className = 'tag-pill-label';
+            labelEl.textContent = label;
+            pill.appendChild(labelEl);
+
+            styleTagPill(pill, tag);
+
+            const unassignTag = async () => {
+              if (tag.inherited) return;
+              try {
+                await api('/api/tags/assign', {
+                  method: 'DELETE',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ tag_id: tag.id, entity_type: scope.entity_type, entity_id: scope.entity_id, actor: 'UI' }),
+                });
+                directIds.delete(tag.id);
+                const idx = tagModels.findIndex(model => model.id === tag.id && !model.inherited);
+                if (idx >= 0) tagModels.splice(idx, 1);
+                removeTagFromBundles(tag.id, scope);
+                renderTags();
+                if (typeof fundingState.refreshCurrentBudget === 'function') {
+                  await fundingState.refreshCurrentBudget();
+                }
+                enqueueScopedRebuild(scope);
+              } catch (err) {
+                showError(err);
+              }
+            };
+
+            if (!tag.inherited) {
+              const removeBtn = document.createElement('button');
+              removeBtn.type = 'button';
+              removeBtn.className = 'tag-pill-remove';
+              removeBtn.innerHTML = '×';
+              removeBtn.title = `Remove ${label}`;
+              removeBtn.setAttribute('aria-label', `Remove ${label}`);
+              removeBtn.addEventListener('click', (evt) => {
+                evt.stopPropagation();
+                unassignTag();
+              });
+              pill.appendChild(removeBtn);
+            }
+
+            const openEditor = () => {
+              openTagEditor(pill, tag, {
+                onSaved: async (updated) => {
+                  if (!updated) {
+                    if (typeof fundingState.refreshCurrentBudget === 'function') {
+                      await fundingState.refreshCurrentBudget();
+                    }
+                    return;
+                  }
+                  applyTagUpdate(updated);
+                  const idx = tagModels.findIndex(model => model.id === updated.id);
+                  if (idx >= 0) {
+                    tagModels[idx] = { ...tagModels[idx], ...updated };
+                  }
+                  renderTags();
+                  if (typeof fundingState.refreshCurrentBudget === 'function') {
+                    await fundingState.refreshCurrentBudget();
+                  }
+                },
+              });
+            };
+
+            pill.addEventListener('click', (evt) => {
+              if (!tag.inherited && (evt.altKey || evt.metaKey || evt.shiftKey)) {
+                evt.stopPropagation();
+                unassignTag();
+                return;
+              }
+              openEditor();
+            });
+
+            pill.addEventListener('keydown', (evt) => {
+              if (evt.key === 'Enter' || evt.key === ' ') {
+                evt.preventDefault();
+                openEditor();
+              }
+              if (!tag.inherited && (evt.key === 'Backspace' || evt.key === 'Delete')) {
+                evt.preventDefault();
+                unassignTag();
+              }
+            });
+
+            return pill;
+          };
+
+          function renderTags() {
+            listEl.innerHTML = '';
+            if (showLabel) {
+              const labelEl = document.createElement('span');
+              labelEl.className = 'tag-line-label';
+              labelEl.textContent = 'Tags:';
+              listEl.appendChild(labelEl);
+            }
+            tagModels.forEach(tag => listEl.appendChild(buildPill(tag)));
+          }
+
+          const observer = new ResizeObserver(() => {
+            renderTags();
+          });
+          observer.observe(container);
+          container.__tagObserver = observer;
+
+          renderTags();
+
+          addBtn.addEventListener('click', (evt) => {
+            evt.stopPropagation();
+            openTagPicker(addBtn, {
+              node,
+              directIds,
+              onAssigned: async () => {
+                if (typeof fundingState.refreshCurrentBudget === 'function') {
+                  await fundingState.refreshCurrentBudget();
+                }
+              },
+              onCreated: async () => {
+                await refreshTagUsage();
+              },
+            });
+          });
+
+          container.__tagOutside = null;
+        }
+
         function updateTagCaches(tag) {
           fundingState.tagCache.forEach((arr, key) => {
             const idx = arr.findIndex(t => t.id === tag.id);
@@ -1827,1526 +1989,55 @@
           } catch (e) { showError(e); }
         };
   
+        const FUNDING_MODULE_VERSION = '20240602T1200';
+
         // ---------- Renderers ----------
         async function renderPortfolios(){
+          if (fundingState.unmountFundingPage) {
+            try { fundingState.unmountFundingPage(); } catch (err) { console.warn('Failed to unmount funding page', err); }
+            fundingState.unmountFundingPage = null;
+          }
           clearFundingState();
-          fundingState.searchTerm = '';
+          fundingState.searchTerm = fundingState.searchTerm || '';
           fundingState.tagCache.clear();
           fundingState.usageCache = null;
-
-          content.innerHTML = `
-            <div class="funding-shell">
-              <aside class="funding-sidebar">
-                <div class="funding-toolbar">
-                  <div class="funding-toolbar-actions">
-                    <button id="newBudgetButton" class="btn-primary">+ New Budget</button>
-                    <button id="tagManagerButton">Tag Manager</button>
-                    <button id="rebuildTagsButton">Rebuild Effective Tags</button>
-                  </div>
-                  <input id="budgetSearch" class="input" placeholder="Search budgets…" autocomplete="off" />
-                </div>
-                <div id="fundingList" class="funding-list"></div>
-              </aside>
-              <section id="fundingLedger" class="funding-ledger">
-                <div class="funding-empty">Select a funding source to inspect.</div>
-              </section>
-              <aside id="inspectorDrawer" class="drawer hidden"></aside>
-            </div>`;
-
-          const listEl = content.querySelector('#fundingList');
-          const ledgerEl = content.querySelector('#fundingLedger');
-          const inspectorEl = content.querySelector('#inspectorDrawer');
-          const shellEl = content.querySelector('.funding-shell');
-          const searchInput = content.querySelector('#budgetSearch');
-          const newBudgetBtn = content.querySelector('#newBudgetButton');
-          const tagManagerBtn = content.querySelector('#tagManagerButton');
-          const rebuildBtn = content.querySelector('#rebuildTagsButton');
-
-          const makeKey = (node) => `${node.type}:${node.id}`;
-
-          const expansionStorageKey = (budgetId) => `funding-expanded-${budgetId}`;
-
-          function loadExpansionState(budgetId, availableKeys) {
-            if (!budgetId) return null;
-            try {
-              const raw = localStorage.getItem(expansionStorageKey(budgetId));
-              if (!raw) return null;
-              const parsed = JSON.parse(raw);
-              if (!Array.isArray(parsed)) return null;
-              const set = new Set();
-              parsed.forEach(key => {
-                if (!availableKeys || availableKeys.has(key)) set.add(key);
-              });
-              return set;
-            } catch (err) {
-              console.warn('Failed to load expansion state', err);
-              return null;
-            }
-          }
-
-          function persistExpansionState(budgetId, set = fundingState.expanded) {
-            if (!budgetId) return;
-            try {
-              localStorage.setItem(expansionStorageKey(budgetId), JSON.stringify([...set]));
-            } catch (err) {
-              console.warn('Failed to persist expansion state', err);
-            }
-          }
-
-          async function loadBudgets(term = '') {
-            fundingState.searchTerm = term;
-            const query = term ? `/api/budgets?include=stats,tags&q=${encodeURIComponent(term)}` : '/api/budgets?include=stats,tags';
-            const budgets = await api(query);
-            fundingState.budgets = budgets;
-            fundingState.filteredBudgets = budgets;
-            fundingState.budgetMap = new Map(budgets.map(b => [b.id, b]));
-          }
-
-          async function loadBudgetTree(budgetId) {
-            if (!budgetId) {
-              ledgerEl.innerHTML = '<div class="funding-empty">Select a funding source to inspect.</div>';
-              return;
-            }
-            const nodes = await api(`/api/budgets/${budgetId}/tree?include=tags,paths,assets`);
-            fundingState.budgetTree = nodes;
-            const hierarchy = buildHierarchy(nodes);
-            fundingState.currentHierarchy = hierarchy;
-            const availableKeys = new Set(nodes.map(node => makeKey(node)));
-            const savedExpansion = loadExpansionState(budgetId, availableKeys);
-            fundingState.expanded.clear();
-            if (savedExpansion && savedExpansion.size) {
-              savedExpansion.forEach(key => fundingState.expanded.add(key));
-            } else {
-              const queue = hierarchy ? [hierarchy] : [];
-              while (queue.length) {
-                const node = queue.shift();
-                const key = makeKey(node);
-                if (availableKeys.has(key)) fundingState.expanded.add(key);
-                if (node.children && node.children.length) {
-                  queue.push(...node.children);
-                }
-              }
-            }
-            if (hierarchy) {
-              fundingState.expanded.add(makeKey(hierarchy));
-            }
-            persistExpansionState(budgetId);
-            renderLedger();
-          }
-
-          function buildHierarchy(nodes) {
-            if (!nodes || !nodes.length) return null;
-            const budgetNode = nodes.find(n => n.type === 'budget');
-            if (!budgetNode) return null;
-            const projectMap = new Map();
-            const categoryMap = new Map();
-            nodes.forEach(node => {
-              if (node.type === 'project') {
-                node.children = [];
-                projectMap.set(node.id, node);
-              } else if (node.type === 'category') {
-                node.children = [];
-                categoryMap.set(node.id, node);
-              }
-            });
-            nodes.forEach(node => {
-              if (node.type === 'category') {
-                if (node.parent_id) {
-                  const parent = categoryMap.get(node.parent_id);
-                  if (parent) {
-                    parent.children.push(node);
-                    parent.is_leaf = false;
-                  } else {
-                    const fallbackProject = projectMap.get(node.project_id || node.item_project_id);
-                    if (fallbackProject) fallbackProject.children.push(node);
-                  }
-                } else {
-                  const parentProject = projectMap.get(node.project_id || node.item_project_id);
-                  if (parentProject) parentProject.children.push(node);
-                }
-              }
-            });
-            budgetNode.children = Array.from(projectMap.values());
-            fundingState.projectNodeMap = projectMap;
-            fundingState.categoryNodeMap = categoryMap;
-            return budgetNode;
-          }
-
-          function renderBudgetList() {
-            listEl.innerHTML = '';
-            if (!fundingState.budgets.length) {
-              const empty = document.createElement('div');
-              empty.className = 'funding-list-empty';
-              empty.textContent = 'No funding sources found.';
-              listEl.appendChild(empty);
-              return;
-            }
-            fundingState.budgets.forEach(budget => {
-              const item = document.createElement('button');
-              item.className = 'funding-item';
-              if (budget.id === fundingState.selectedBudgetId) item.classList.add('active');
-
-              const name = document.createElement('div');
-              name.className = 'funding-item-name';
-              name.textContent = budget.name;
-              item.appendChild(name);
-
-              const total = document.createElement('div');
-              total.className = 'funding-item-total';
-              const numericTotal = Number(budget.budget_amount_cache || 0);
-              if (numericTotal < 0) total.classList.add('err');
-              else if (!numericTotal) total.classList.add('warn');
-              total.textContent = fmtCurrency(numericTotal);
-              item.appendChild(total);
-
-              const metrics = document.createElement('div');
-              metrics.className = 'funding-item-metrics';
-              const stats = budget.stats || {};
-              const metricDefs = [
-                { label: 'Categories', value: stats.category_count },
-                { label: 'Leaves', value: stats.leaf_count },
-                { label: 'Entries', value: stats.entry_count },
-                { label: 'Alloc', value: stats.allocation_count },
-              ];
-              metricDefs.forEach(def => {
-                if (def.value === undefined || def.value === null) return;
-                const span = document.createElement('span');
-                span.className = 'funding-item-metric';
-                span.innerHTML = `<span>${def.label}</span><strong>${def.value}</strong>`;
-                metrics.appendChild(span);
-              });
-              const owner = document.createElement('span');
-              owner.className = 'funding-item-metric';
-              owner.innerHTML = `<span>Owner</span><strong>${escapeHtml(budget.owner || '—')}</strong>`;
-              metrics.appendChild(owner);
-              item.appendChild(metrics);
-
-              const tagsLine = document.createElement('div');
-              tagsLine.className = 'funding-item-tags';
-              const directTags = (budget.tags?.direct || []).slice(0, 5);
-              directTags.forEach(tag => {
-                const chip = document.createElement('span');
-                chip.textContent = `#${tag.name}`;
-                tagsLine.appendChild(chip);
-              });
-              if (budget.is_cost_center) {
-                const chip = document.createElement('span');
-                chip.textContent = 'COST CENTER';
-                tagsLine.appendChild(chip);
-              }
-              if (tagsLine.children.length) item.appendChild(tagsLine);
-
-              item.addEventListener('click', () => selectBudget(budget.id));
-              listEl.appendChild(item);
-            });
-          }
-
-          function attachTagRow(container, node, { showLabel = false } = {}) {
-            const scope = { entity_type: toScopeType(node.type), entity_id: node.id, type: node.type };
-            if (container.__tagObserver) container.__tagObserver.disconnect();
-            if (container.__tagOutside) {
-              document.removeEventListener('mousedown', container.__tagOutside, true);
-            }
-            container.innerHTML = '';
-            container.classList.add('tag-region');
-            container.style.position = 'relative';
-
-            const listEl = document.createElement('div');
-            listEl.className = 'tag-list';
-            container.appendChild(listEl);
-
-            const addBtn = document.createElement('button');
-            addBtn.type = 'button';
-            addBtn.className = 'tag-add';
-            addBtn.textContent = '+ Add tag';
-            container.appendChild(addBtn);
-
-            const tags = node.tags || { direct: [], inherited: [] };
-            const directIds = new Set((tags.direct || []).map(t => t.id));
-            const tagModels = [
-              ...(tags.direct || []).map(tag => ({ ...tag, inherited: false })),
-              ...(tags.inherited || []).map(tag => ({ ...tag, inherited: true })),
-            ];
-
-            const buildPill = (tag) => {
-              const label = `#${tag.name}`;
-              const pill = document.createElement('span');
-              pill.className = 'tag-pill';
-              pill.dataset.inherited = tag.inherited ? '1' : '0';
-              pill.tabIndex = 0;
-              pill.setAttribute('role', 'button');
-              pill.title = label;
-
-              const labelEl = document.createElement('span');
-              labelEl.className = 'tag-pill-label';
-              labelEl.textContent = label;
-              pill.appendChild(labelEl);
-
-              styleTagPill(pill, tag);
-
-              const unassignTag = async () => {
-                if (tag.inherited) return;
-                try {
-                  await api('/api/tags/assign', {
-                    method: 'DELETE',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tag_id: tag.id, entity_type: scope.entity_type, entity_id: scope.entity_id, actor: 'UI' }),
-                  });
-                  directIds.delete(tag.id);
-                  const idx = tagModels.findIndex(model => model.id === tag.id && !model.inherited);
-                  if (idx >= 0) tagModels.splice(idx, 1);
-                  removeTagFromBundles(tag.id, scope);
-                  renderTags();
-                  await refreshCurrentBudget();
-                  enqueueScopedRebuild(scope);
-                } catch (err) {
-                  showError(err);
-                }
-              };
-
-              if (!tag.inherited) {
-                const removeBtn = document.createElement('button');
-                removeBtn.type = 'button';
-                removeBtn.className = 'tag-pill-remove';
-                removeBtn.innerHTML = '×';
-                removeBtn.title = `Remove ${label}`;
-                removeBtn.setAttribute('aria-label', `Remove ${label}`);
-                removeBtn.addEventListener('click', (evt) => {
-                  evt.stopPropagation();
-                  unassignTag();
-                });
-                pill.appendChild(removeBtn);
-              }
-
-              const openEditor = () => {
-                openTagEditor(pill, tag, {
-                  onSaved: async (updated) => {
-                    if (!updated) {
-                      await refreshCurrentBudget();
-                      return;
-                    }
-                    applyTagUpdate(updated);
-                    const idx = tagModels.findIndex(model => model.id === updated.id);
-                    if (idx >= 0) {
-                      tagModels[idx] = { ...tagModels[idx], ...updated };
-                    }
-                    renderTags();
-                    await refreshCurrentBudget();
-                  },
-                });
-              };
-
-              pill.addEventListener('click', (evt) => {
-                if (!tag.inherited && (evt.altKey || evt.metaKey || evt.shiftKey)) {
-                  evt.stopPropagation();
-                  unassignTag();
-                  return;
-                }
-                openEditor();
-              });
-
-              pill.addEventListener('keydown', (evt) => {
-                if (evt.key === 'Enter' || evt.key === ' ') {
-                  evt.preventDefault();
-                  openEditor();
-                }
-                if (!tag.inherited && (evt.key === 'Backspace' || evt.key === 'Delete')) {
-                  evt.preventDefault();
-                  unassignTag();
-                }
-              });
-
-              return pill;
-            };
-
-            function renderTags() {
-              listEl.innerHTML = '';
-              if (showLabel) {
-                const labelEl = document.createElement('span');
-                labelEl.className = 'tag-line-label';
-                labelEl.textContent = 'Tags:';
-                listEl.appendChild(labelEl);
-              }
-              tagModels.forEach(tag => listEl.appendChild(buildPill(tag)));
-            }
-
-            const observer = new ResizeObserver(() => {
-              renderTags();
-            });
-            observer.observe(container);
-            container.__tagObserver = observer;
-
-            renderTags();
-
-            addBtn.addEventListener('click', (evt) => {
-              evt.stopPropagation();
-              openTagPicker(addBtn, {
-                node,
-                directIds,
-                onAssigned: async () => {
-                  await refreshCurrentBudget();
-                },
-                onCreated: async () => {
-                  await refreshTagUsage();
-                },
-              });
-            });
-
-            container.__tagOutside = null;
-        }
-
-          function makeInlineField(labelText, element, extraClass) {
-            const inline = document.createElement('span');
-            inline.className = 'ledger-inline';
-            inline.dataset.autoGrowHost = '1';
-            if (extraClass) inline.classList.add(extraClass);
-            const label = document.createElement('span');
-            label.className = 'inline-label';
-            label.textContent = labelText;
-            inline.append(label, element);
-            return inline;
-          }
-
-          async function saveBudgetPatch(budgetId, patch) {
-            if (!patch || !Object.keys(patch).length) return;
-            try {
-              await api(`/api/budgets/${budgetId}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(patch),
-              });
-              await refreshCurrentBudget();
-            } catch (err) {
-              showError(err);
-            }
-          }
-
-          async function saveProjectPatch(projectId, patch) {
-            if (!patch || !Object.keys(patch).length) return;
-            try {
-              await api(`/api/item-projects/${projectId}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(patch),
-              });
-              await refreshTreeOnly();
-            } catch (err) {
-              showError(err);
-            }
-          }
-
-          async function ensureLineAsset(name) {
-            const trimmed = (name || '').trim();
-            if (!trimmed) return null;
-            const key = trimmed.toLowerCase();
-            if (fundingState.lineAssetCache.has(key)) return fundingState.lineAssetCache.get(key);
-            try {
-              const candidates = await api(`/api/line-assets?q=${encodeURIComponent(trimmed)}`);
-              const match = (candidates || []).find(asset => asset.name.toLowerCase() === key);
-              if (match) {
-                fundingState.lineAssetCache.set(key, match);
-                return match;
-              }
-            } catch (err) {
-              console.warn('line asset lookup failed', err);
-            }
-            const created = await apiCreate('/api/line-assets', { name: trimmed });
-            fundingState.lineAssetCache.set(key, created);
-            return created;
-          }
-
-          async function attachAssetToProject(projectId, assetId) {
-            await api(`/api/item-projects/${projectId}/line-assets`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ line_asset_id: assetId }),
-            });
-          }
-
-          async function detachAssetFromProject(projectId, assetId) {
-            await api(`/api/item-projects/${projectId}/line-assets/${assetId}`, {
-              method: 'DELETE',
-            });
-          }
-
-          async function saveCategoryPatch(categoryId, patch) {
-            if (!patch || !Object.keys(patch).length) return;
-            try {
-              if (patch.amount_leaf !== undefined && patch.amount_leaf !== null) {
-                patch.amount_leaf = Number(patch.amount_leaf);
-              }
-              await api(`/api/categories/${categoryId}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(patch),
-              });
-              await refreshTreeOnly();
-            } catch (err) {
-              showError(err);
-            }
-          }
-
-          function getProjectNode(projectId) {
-            return fundingState.projectNodeMap.get(projectId) || null;
-          }
-
-          function getCategoryNode(categoryId) {
-            return fundingState.categoryNodeMap.get(categoryId) || null;
-          }
-
-          function collectDescendantIds(node, set) {
-            if (!node) return;
-            set.add(node.id);
-            (node.children || []).forEach(child => collectDescendantIds(child, set));
-          }
-
-          function buildMoveOptions(projectNode, excludeIds) {
-            const options = [];
-            if (projectNode) {
-              options.push({ value: `project:${projectNode.id}`, label: `${projectNode.name} (Project root)` });
-              const queue = [...(projectNode.children || [])];
-              while (queue.length) {
-                const node = queue.shift();
-                if (!node) continue;
-                if (excludeIds.has(node.id)) {
-                  continue;
-                }
-                const label = (node.path_names && node.path_names.length)
-                  ? node.path_names.join(' › ')
-                  : node.name;
-                options.push({ value: `category:${node.id}`, label });
-                (node.children || []).forEach(child => queue.push(child));
-              }
-            }
-            return options;
-          }
-
-          function openCategoryModal({ projectNode, parentCategory = null }) {
-            if (!projectNode) return;
-            const parentName = parentCategory
-              ? (parentCategory.path_names && parentCategory.path_names.length
-                  ? parentCategory.path_names.join(' › ')
-                  : parentCategory.name)
-              : projectNode.name;
-            openFormModal({
-              title: `New Item under ${parentName}`,
-              submitLabel: 'Create Item',
-              fields: [
-                { name: 'name', label: 'Name', required: true, value: '' },
-                { name: 'amount', label: 'Amount', type: 'number', value: '' },
-              ],
-              onSubmit: async (values, helpers) => {
-                try {
-                  const payload = {
-                    name: values.name,
-                    project_id: projectNode.id,
-                    budget_id: projectNode.budget_id || fundingState.selectedBudgetId,
-                    parent_id: parentCategory ? parentCategory.id : null,
-                    is_leaf: true,
-                    amount_leaf: values.amount !== '' && values.amount !== null && values.amount !== undefined
-                      ? Number(values.amount)
-                      : null,
-                    description: null,
-                  };
-                  if (payload.amount_leaf !== null) {
-                    if (Number.isNaN(payload.amount_leaf)) {
-                      helpers.setError('Amount must be a number.');
-                      return;
-                    }
-                    payload.amount_leaf = Math.round(payload.amount_leaf * 100) / 100;
-                  }
-                  await apiCreate('/api/categories', payload);
-                  helpers.close();
-                  const budgetKey = projectNode.budget_id || fundingState.selectedBudgetId;
-                  if (budgetKey) {
-                    const projectKey = `project:${projectNode.id}`;
-                    fundingState.expanded.add(projectKey);
-                    if (parentCategory) {
-                      const parentKey = `${parentCategory.type || 'category'}:${parentCategory.id}`;
-                      fundingState.expanded.add(parentKey);
-                    }
-                    persistExpansionState(budgetKey);
-                  }
-                  showBanner('Category created', 'success');
-                  hideBanner(1500);
-                  await refreshTreeOnly();
-                } catch (err) {
-                  helpers.setError(err?.message || String(err));
-                }
-              },
-            });
-          }
-
-          function openMoveCategoryModal(category) {
-            let projectNode = getProjectNode(category.project_id || category.item_project_id);
-            if (!projectNode) {
-              projectNode = {
-                id: category.project_id || category.item_project_id,
-                budget_id: fundingState.selectedBudgetId,
-                name: 'Project',
-                children: [],
-              };
-            }
-            const categoryNode = getCategoryNode(category.id) || category;
-            const exclude = new Set();
-            collectDescendantIds(categoryNode, exclude);
-            const options = buildMoveOptions(projectNode, exclude);
-            openFormModal({
-              title: `Move ${category.name}`,
-              submitLabel: 'Move',
-              fields: [
-                {
-                  name: 'target',
-                  label: 'Move to',
-                  type: 'select',
-                  required: true,
-                  options: options.length ? options : [{ value: '', label: 'No available targets' }],
-                  value: options.length ? options[0].value : '',
-                },
-              ],
-              onSubmit: async (values, helpers) => {
-                try {
-                  if (!values.target) {
-                    helpers.setError('Select a target for the move.');
-                    return;
-                  }
-                  const [kind, rawId] = values.target.split(':');
-                  const targetId = kind === 'category' ? Number(rawId) : null;
-                  const query = targetId ? `?new_parent_id=${targetId}` : '';
-                  const check = await api(`/api/categories/${category.id}/can-move${query}`);
-                  if (!check.can_move) {
-                    const reason = check.reason ? check.reason.replace(/_/g, ' ') : 'blocked';
-                    const extra = check.count ? ` (count: ${check.count})` : '';
-                    helpers.setError(`Cannot move: ${reason}${extra}`);
-                    return;
-                  }
-                  await api(`/api/categories/${category.id}`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ parent_id: targetId }),
-                  });
-                  helpers.close();
-                  showBanner('Category moved', 'success');
-                  hideBanner(1500);
-                  await refreshCurrentBudget();
-                } catch (err) {
-                  helpers.setError(err?.message || String(err));
-                }
-              },
-            });
-          }
-
-          function attachEnterCommit(input) {
-            input.addEventListener('keydown', (evt) => {
-              if (evt.key === 'Enter' && !evt.shiftKey) {
-                evt.preventDefault();
-                input.blur();
-              }
-            });
-          }
-
-          function renderBudgetCard(budget, rootNode) {
-            const card = document.createElement('div');
-            card.className = 'ledger-budget-card';
-
-            const line1 = document.createElement('div');
-            line1.className = 'ledger-line';
-
-            const badge = document.createElement('span');
-            badge.className = 'label';
-            badge.textContent = 'Budget';
-            line1.appendChild(badge);
-
-            const nameInput = document.createElement('textarea');
-            nameInput.rows = 1;
-            nameInput.value = budget.name || '';
-            nameInput.placeholder = 'Budget name';
-            attachEnterCommit(nameInput);
-            setupAutoGrow(nameInput, { maxPercent: 0.6, minWidth: 260, minHeight: 32 });
-            nameInput.addEventListener('change', async () => {
-              const next = nameInput.value.trim();
-              if (!next || next === budget.name) {
-                nameInput.value = budget.name || '';
-                triggerAutoGrow(nameInput);
-                return;
-              }
-              await saveBudgetPatch(budget.id, { name: next });
-              triggerAutoGrow(nameInput);
-            });
-            line1.appendChild(makeInlineField('Name', nameInput));
-            requestAnimationFrame(() => triggerAutoGrow(nameInput));
-
-            const ownerInput = document.createElement('textarea');
-            ownerInput.rows = 1;
-            ownerInput.value = budget.owner || '';
-            ownerInput.placeholder = 'Owner';
-            attachEnterCommit(ownerInput);
-            setupAutoGrow(ownerInput, { maxPercent: 0.6, minWidth: 220, minHeight: 32 });
-            ownerInput.disabled = !!budget.is_cost_center;
-            ownerInput.addEventListener('change', async () => {
-              const next = ownerInput.value.trim();
-              const normalized = next === '' ? null : next;
-              if ((budget.owner || null) === normalized) {
-                triggerAutoGrow(ownerInput);
-                return;
-              }
-              await saveBudgetPatch(budget.id, { owner: normalized });
-              triggerAutoGrow(ownerInput);
-            });
-            line1.appendChild(makeInlineField('Owner', ownerInput));
-            requestAnimationFrame(() => triggerAutoGrow(ownerInput));
-
-            const costCenterInput = document.createElement('input');
-            costCenterInput.type = 'checkbox';
-            costCenterInput.checked = !!budget.is_cost_center;
-            costCenterInput.addEventListener('change', async () => {
-              const next = !!costCenterInput.checked;
-              if (next === !!budget.is_cost_center) return;
-              ownerInput.disabled = next;
-              triggerAutoGrow(ownerInput);
-              closureInput.disabled = next;
-              await saveBudgetPatch(budget.id, { is_cost_center: next });
-            });
-            const costInline = makeInlineField('Cost Center', costCenterInput);
-            costInline.classList.add('inline-checkbox');
-            line1.appendChild(costInline);
-
-            const closureInput = document.createElement('input');
-            closureInput.type = 'date';
-            const closureValue = budget.closure_date ? String(budget.closure_date).slice(0, 10) : '';
-            closureInput.value = closureValue;
-            closureInput.disabled = !!budget.is_cost_center;
-            closureInput.addEventListener('change', async () => {
-              const next = closureInput.value || null;
-              const current = budget.closure_date ? String(budget.closure_date).slice(0, 10) : null;
-              if (current === (next || null)) return;
-              await saveBudgetPatch(budget.id, { closure_date: next });
-            });
-            line1.appendChild(makeInlineField('Closure', closureInput));
-
-            const totalValue = document.createElement('strong');
-            totalValue.className = 'value';
-            totalValue.textContent = fmtCurrency(budget.budget_amount_cache);
-            line1.appendChild(makeInlineField('Budget', totalValue, 'value'));
-
-            card.appendChild(line1);
-
-            const tagLine = document.createElement('div');
-            tagLine.className = 'ledger-line ledger-tag-line';
-            attachTagRow(tagLine, rootNode, { showLabel: true });
-            card.appendChild(tagLine);
-
-            const descLine = document.createElement('div');
-            descLine.className = 'ledger-line';
-            descLine.dataset.autoGrowHost = '1';
-            const descLabel = document.createElement('span');
-            descLabel.className = 'label';
-            descLabel.textContent = 'Description';
-            descLine.appendChild(descLabel);
-
-            const descInput = document.createElement('textarea');
-            descInput.rows = 2;
-            descInput.placeholder = 'Describe this budget…';
-            descInput.value = budget.description || '';
-            setupAutoGrow(descInput, { maxPercent: 0.98, minWidth: 320, minHeight: 60 });
-            descInput.addEventListener('change', async () => {
-              const next = descInput.value.trim();
-              const normalized = next === '' ? null : next;
-              if ((budget.description || null) === normalized) {
-                triggerAutoGrow(descInput);
-                return;
-              }
-              await saveBudgetPatch(budget.id, { description: normalized });
-              triggerAutoGrow(descInput);
-            });
-            descLine.appendChild(descInput);
-            card.appendChild(descLine);
-            requestAnimationFrame(() => triggerAutoGrow(descInput));
-
-            const actionsRow = document.createElement('div');
-            actionsRow.className = 'ledger-controls';
-            const newItemBtn = document.createElement('button');
-            newItemBtn.type = 'button';
-            newItemBtn.className = 'btn-primary';
-            newItemBtn.textContent = '+ New Item/Project';
-            newItemBtn.addEventListener('click', () => openItemProjectModal(budget));
-            actionsRow.appendChild(newItemBtn);
-            card.appendChild(actionsRow);
-
-            return card;
-          }
-
-          function renderLedger() {
-            ledgerEl.innerHTML = '';
-            const hierarchy = fundingState.currentHierarchy;
-            if (!hierarchy) {
-              ledgerEl.innerHTML = '<div class="funding-empty">Select a funding source to inspect.</div>';
-              return;
-            }
-            const budget = fundingState.budgetMap.get(fundingState.selectedBudgetId);
-            const header = renderBudgetCard(budget, hierarchy);
-            ledgerEl.appendChild(header);
-
-            const body = document.createElement('div');
-            body.className = 'ledger-body';
-
-            const treeHolder = document.createElement('div');
-            treeHolder.className = 'ledger-tree-host';
-
-            const treeEl = document.createElement('div');
-            treeEl.id = 'budgetTree';
-            treeHolder.appendChild(treeEl);
-            body.appendChild(treeHolder);
-            ledgerEl.appendChild(body);
-
-            const nodes = buildTreeNodes(hierarchy.children || []);
-            const expandedKeys = Array.from(fundingState.expanded);
-            const actions = {
-              fmtCurrency,
-              saveProjectPatch,
-              saveCategoryPatch,
-              openCategoryModal,
-              openMoveCategoryModal,
-              openInspector: openInspectorFor,
-              openAssetModal,
-              detachAssetFromProject,
-              attachTagRow,
-              getProjectNode,
-              getCategoryNode,
-              refreshTreeOnly,
-              showError,
-            };
-            const onToggle = (node, expand) => {
-              const key = node?.key;
-              if (!key) return;
-              if (expand) {
-                fundingState.expanded.add(key);
-              } else {
-                fundingState.expanded.delete(key);
-              }
-              persistExpansionState(fundingState.selectedBudgetId);
-            };
-
-            if (window.BudgetTreeReact && typeof window.BudgetTreeReact.render === 'function') {
-              window.BudgetTreeReact.render(treeEl, { nodes, expandedKeys, onToggle, actions });
-            } else {
-              treeEl.textContent = 'Tree component not available';
-            }
-          }
-
-          function buildTreeNodes(projects = []) {
-            return sortChildren(projects).map(project => toTreeNode(project)).filter(Boolean);
-          }
-
-          function toTreeNode(entity) {
-            if (!entity) return null;
-            const key = makeKey(entity);
-            const children = (entity.children && entity.children.length)
-              ? sortChildren(entity.children).map(child => toTreeNode(child)).filter(Boolean)
-              : [];
-            const hasChildren = children.length > 0;
-            const node = {
-              key,
-              type: entity.type,
-              label: entity.name || '',
-              isLeaf: entity.type === 'category' ? !hasChildren : false,
-              data: entity,
-            };
-            if (children.length) node.children = children;
-            return node;
-          }
-
-          function sortChildren(list) {
-            return [...list].sort((a, b) => {
-              const an = (a && a.path_names && a.path_names.length) ? a.path_names.join(' ') : (a && a.name ? a.name : '');
-              const bn = (b && b.path_names && b.path_names.length) ? b.path_names.join(' ') : (b && b.name ? b.name : '');
-              return an.localeCompare(bn);
-            });
-          }
-
-          function openItemProjectModal(budget) {
-            openFormModal({
-              title: `New Item/Project for ${budget.name}`,
-              submitLabel: 'Create Item/Project',
-              fields: [
-                { name: 'name', label: 'Name', required: true, value: '' },
-                { name: 'assets', label: 'Assets (optional)', type: 'textarea', rows: 3, hint: 'Separate multiple assets with commas or new lines.' },
-              ],
-              onSubmit: async (values, helpers) => {
-                try {
-                  const payload = {
-                    budget_id: budget.id,
-                    name: values.name,
-                    description: null,
-                  };
-                  const created = await apiCreate('/api/item-projects', payload);
-                  const parts = (values.assets || '')
-                    .split(/\r?\n|,/)
-                    .map(part => part.trim())
-                    .filter(Boolean);
-                  for (const piece of parts) {
-                    const asset = await ensureLineAsset(piece);
-                    await attachAssetToProject(created.id, asset.id);
-                  }
-                  helpers.close();
-                  showBanner('Item/Project created', 'success');
-                  hideBanner(1500);
-                  await refreshCurrentBudget();
-                } catch (err) {
-                  helpers.setError(err?.message || String(err));
-                }
-              },
-            });
-          }
-
-          function openAssetModal(project) {
-            openFormModal({
-              title: `Add assets to ${project.name}`,
-              submitLabel: 'Attach Assets',
-              fields: [
-                { name: 'assets', label: 'Asset names', type: 'textarea', rows: 3, required: true, hint: 'Separate multiple assets with commas or new lines.' },
-              ],
-              onSubmit: async (values, helpers) => {
-                try {
-                  const parts = (values.assets || '')
-                    .split(/\r?\n|,/)
-                    .map(part => part.trim())
-                    .filter(Boolean);
-                  if (!parts.length) {
-                    helpers.setError('Provide at least one asset name.');
-                    return;
-                  }
-                  for (const piece of parts) {
-                    const asset = await ensureLineAsset(piece);
-                    await attachAssetToProject(project.id, asset.id);
-                  }
-                  helpers.close();
-                  await refreshCurrentBudget();
-                } catch (err) {
-                  helpers.setError(err?.message || String(err));
-                }
-              },
-            });
-          }
-
-          function closeInspector() {
-            fundingState.inspector = { open: false, entity: null };
-            inspectorEl.classList.add('hidden');
-            inspectorEl.innerHTML = '';
-            if (shellEl) shellEl.classList.remove('has-inspector');
-          }
-
-          async function refreshCurrentBudget() {
-            closeInspector();
-            fundingState.lineAssetCache.clear();
-            await loadBudgets(fundingState.searchTerm);
-            renderBudgetList();
-            await loadBudgetTree(fundingState.selectedBudgetId);
-          }
-
-          async function refreshTreeOnly() {
-            if (!fundingState.selectedBudgetId) return;
-            await loadBudgetTree(fundingState.selectedBudgetId);
-          }
-
-          fundingState.refreshCurrentBudget = refreshCurrentBudget;
-
-          let searchTimer = null;
-          searchInput.addEventListener('input', () => {
-            const term = searchInput.value.trim();
-            if (searchTimer) clearTimeout(searchTimer);
-            searchTimer = setTimeout(async () => {
-              await loadBudgets(term);
-              renderBudgetList();
-              if (!fundingState.budgetMap.has(fundingState.selectedBudgetId)) {
-                fundingState.selectedBudgetId = null;
-                ledgerEl.innerHTML = '<div class="funding-empty">Select a funding source to inspect.</div>';
-              }
-            }, 220);
-          });
-
-          if (newBudgetBtn) newBudgetBtn.onclick = () => openBudgetModal();
-
-          if (tagManagerBtn) tagManagerBtn.onclick = () => {
-            const navBtn = document.querySelector('nav button[data-tab="tags"]');
-            if (navBtn) {
-              navBtn.click();
-            }
-          };
-
-          if (rebuildBtn) rebuildBtn.onclick = () => enqueueScopedRebuild(null, 'UI');
-
-          function openBudgetModal() {
-            openFormModal({
-              title: 'New Budget',
-              submitLabel: 'Create Budget',
-              fields: [
-                { name: 'name', label: 'Name', required: true, value: '' },
-                { name: 'owner', label: 'Owner', value: '' },
-                { name: 'is_cost_center', label: 'Cost Center?', type: 'checkbox', value: false },
-                { name: 'closure_date', label: 'Closure Date', type: 'date', value: '' },
-                { name: 'description', label: 'Description', type: 'textarea', rows: 3, value: '' },
-              ],
-              onSubmit: async (values, helpers) => {
-                try {
-                  const payload = {
-                    name: values.name,
-                    owner: values.owner || null,
-                    is_cost_center: !!values.is_cost_center,
-                    closure_date: values.closure_date || null,
-                    description: values.description || null,
-                  };
-                  const created = await apiCreate('/api/budgets', payload);
-                  helpers.close();
-                  showBanner('Budget created', 'success');
-                  fundingState.searchTerm = '';
-                  if (searchInput) searchInput.value = '';
-                  await loadBudgets('');
-                  renderBudgetList();
-                  await selectBudget(created.id);
-                } catch (err) {
-                  helpers.setError(err?.message || String(err));
-                }
-              },
-            });
-          }
-
-          async function selectBudget(budgetId) {
-            if (fundingState.selectedBudgetId === budgetId) return;
-            fundingState.selectedBudgetId = budgetId;
-            renderBudgetList();
-            await loadBudgetTree(budgetId);
-          }
-
+          if (!fundingState.expanded) fundingState.expanded = new Set();
+          const container = document.createElement('div');
+          container.id = 'fundingReactRoot';
+          content.innerHTML = '';
+          content.appendChild(container);
           try {
-            await loadBudgets('');
-            renderBudgetList();
-            if (fundingState.budgets.length) {
-              await selectBudget(fundingState.budgets[0].id);
-            }
+            const moduleUrl = `/funding.react.js?v=${FUNDING_MODULE_VERSION}`;
+            const module = await import(moduleUrl);
+            const navigateToTags = () => {
+              const navBtn = document.querySelector('nav button[data-tab="tags"]');
+              if (navBtn) navBtn.click();
+            };
+            const unmount = module.renderFundingPage({
+              container,
+              api,
+              apiCreate,
+              apiUpdate,
+              apiDelete,
+              fmtCurrency,
+              showError,
+              showBanner,
+              hideBanner,
+              enqueueScopedRebuild,
+              openFormModal,
+              attachTagRow,
+              createTagChip,
+              openTagEditor,
+              toScopeType,
+              fundingState,
+              navigateToTags,
+            });
+            fundingState.unmountFundingPage = unmount;
           } catch (err) {
             showError(err);
           }
-
-          function openInspectorFor(node) {
-            fundingState.currentHierarchy && closeInspector();
-            openInspectorDrawer(node);
-          }
-
-          function openInspectorDrawer(node) {
-            fundingState.inspector = { open: true, entity: node };
-            inspectorEl.classList.remove('hidden');
-            if (shellEl) shellEl.classList.add('has-inspector');
-            inspectorEl.innerHTML = '';
-            const panel = document.createElement('div');
-            panel.className = 'drawer-panel inspector-panel';
-            const scopeName = TAG_SCOPE_TYPES[toScopeType(node.type)] || node.type;
-            panel.innerHTML = `
-              <div class="drawer-header">
-                <div>
-                  <h3>${escapeHtml(scopeName)}</h3>
-                  <div class="inspector-sub">${escapeHtml(node.name || '')}</div>
-                </div>
-                <button type="button" class="close-inspector">×</button>
-              </div>
-              <div class="inspector-section">
-                <div class="inspector-meta"><strong>ID:</strong> ${node.id}</div>
-                ${node.path_names ? `<div class="inspector-meta"><strong>Path:</strong> ${node.path_names.join(' / ')}</div>` : ''}
-                <div class="inspector-meta"><strong>Amount:</strong> ${fmtCurrency(node.amount_leaf || node.rollup_amount)}</div>
-              </div>
-              <div class="inspector-section inspector-tags-block">
-                <div class="inspector-tags" data-kind="direct"></div>
-                <div class="inspector-tags" data-kind="inherited"></div>
-                <div class="inspector-tags" data-kind="effective"></div>
-              </div>
-              <div class="inspector-actions">
-                <button type="button" class="rebuild-scope">Rebuild tags for this scope</button>
-              </div>`;
-            inspectorEl.appendChild(panel);
-            panel.querySelector('.close-inspector').onclick = closeInspector;
-            panel.querySelector('.rebuild-scope').onclick = () => enqueueScopedRebuild({ entity_type: toScopeType(node.type), entity_id: node.id }, 'Inspector');
-            const bundles = node.tags || { direct: [], inherited: [], effective: [] };
-            const directBox = panel.querySelector('[data-kind="direct"]');
-            const inheritedBox = panel.querySelector('[data-kind="inherited"]');
-            const effectiveBox = panel.querySelector('[data-kind="effective"]');
-            directBox.innerHTML = '<div class="inspector-title">Direct</div>';
-            (bundles.direct || []).forEach(tag => {
-              const chip = createTagChip(tag, {
-                inherited: false,
-                onEdit: (t, anchor) => openTagEditor(anchor, t, {
-                  onSaved: refreshCurrentBudget,
-                }),
-                onRemove: async (tagToRemove) => {
-                  await api('/api/tags/assign', {
-                    method: 'DELETE',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tag_id: tagToRemove.id, entity_type: toScopeType(node.type), entity_id: node.id, actor: 'UI' }),
-                  });
-                  await refreshCurrentBudget();
-                  enqueueScopedRebuild({ entity_type: toScopeType(node.type), entity_id: node.id }, 'Inspector');
-                },
-              });
-              directBox.appendChild(chip);
-            });
-            inheritedBox.innerHTML = '<div class="inspector-title">Inherited</div>';
-            (bundles.inherited || []).forEach(tag => {
-              const chip = createTagChip(tag, {
-                inherited: true,
-                onEdit: (t, anchor) => openTagEditor(anchor, t, {
-                  onSaved: refreshCurrentBudget,
-                }),
-              });
-              inheritedBox.appendChild(chip);
-            });
-            effectiveBox.innerHTML = '<div class="inspector-title">Effective</div>';
-            (bundles.effective || []).forEach(tag => {
-              const chip = createTagChip(tag, {
-                inherited: true,
-                onEdit: (t, anchor) => openTagEditor(anchor, t, {
-                  onSaved: refreshCurrentBudget,
-                }),
-              });
-              effectiveBox.appendChild(chip);
-            });
-          }
         }
-  
-        async function renderVendors(){
-          const vendors = await apiList('/api/vendors');
-          content.innerHTML =
-            card('Add Vendor', `
-              <div class="row">
-                ${field('name', labelFor('name','Vendor name','e.g., "Acme Co."'), input('name','Acme Co.'))}
-                <div class="field"><label>&nbsp;</label><button id="add">Add</button></div>
-              </div>`)
-            + card('All Vendors', table(vendors, [
-              { key: 'id', label: 'ID' },
-              { key: 'name', label: 'Vendor Name' },
-            ], '/api/vendors'));
 
-          initializeDropdowns(content);
-          const add = document.getElementById('add');
-          if (add) add.onclick = async ()=>{
-            const name = content.querySelector('input[name=name]').value;
-            if(!name) return alert('Name required');
-            await apiCreate('/api/vendors', {name});
-            renderVendors();
-          };
-        }
-  
-        // ---- Kind help ----
-        const KIND_HELP = {
-          budget: { title:'Budget', text:`Sets the planned target (limit) for a category/project/funding source.`, required:['amount','portfolio_id'] },
-          quote: { title:'Quote', text:`Vendor quotation (not a PO). Use to compare pricing; does not affect actuals.`, required:['amount','portfolio_id','vendor_id','quote_ref'] },
-          po: { title:'PO', text:`Issued/committed spend with a PO number. Counts toward actuals.`, required:['amount','portfolio_id','po_number'] },
-          unplanned: { title:'Unplanned', text:`Actual spend not originally budgeted. Counts toward actuals.`, required:['amount','portfolio_id'] },
-          adjustment: { title:'Adjustment', text:`Manual correction (+/-). Affects actuals. Use negative for credits.`, required:['amount','portfolio_id'] },
-        };
-        const helpBox = (k='budget')=>{
-          const o = KIND_HELP[k];
-          return `<div class="help-box" id="kindHelp">
-            <h4>${o.title} — what it means</h4>
-            <p>${o.text}</p>
-            <p><span class="badge req">Required:</span> ${o.required.map(x=>`<code>${x}</code>`).join(' ')}</p>
-          </div>`;
-        };
-  
-        // ---- Entries ----
-        async function renderEntries(){
-          const [portfolios, projects, categories, vendors, entries, fundingSources] = await Promise.all([
-            apiList('/api/portfolios'),
-            apiList('/api/projects'),
-            apiList('/api/categories'),
-            apiList('/api/vendors'),
-            apiList('/api/entries'),
-            apiList('/api/funding-sources'),
-          ]);
-          const portfolioMap = mapBy(portfolios);
-          const portfolioOpts = portfolios.map(p => ({ value: p.id, label: formatPortfolioLabel(p), raw: p }));
-          const basePortfolioHandlers = buildResourceDropdownHandlers('/api/portfolios', {
-            formatLabel: formatPortfolioLabel,
-            matcherFields: ['fiscal_year', 'owner', 'type', 'car_code', 'cc_code'],
-          });
-          const portfolioHandlers = {
-            key: 'portfolio',
-            ...basePortfolioHandlers,
-            create: async (label) => {
-              const created = await basePortfolioHandlers.create(label);
-              const option = { value: created.value, label: created.label, raw: created.raw };
-              portfolioOpts.push(option);
-              if (option.raw && option.raw.id !== undefined) {
-                portfolioMap[option.raw.id] = option.raw;
-              }
-              return option;
-            },
-            edit: async (option, nextLabel) => {
-              const updated = await basePortfolioHandlers.edit(option, nextLabel);
-              if (updated.raw && updated.raw.id !== undefined) {
-                portfolioMap[updated.raw.id] = updated.raw;
-              }
-              updated.label = formatPortfolioLabel(updated.raw);
-              return updated;
-            },
-            remove: async (option) => {
-              await basePortfolioHandlers.remove(option);
-              if (option.raw && option.raw.id !== undefined) delete portfolioMap[option.raw.id];
-            },
-          };
-
-          const projectOpts = projects.map(p => ({ value: p.id, label: formatProjectLabel(p, portfolioMap), raw: p }));
-          const baseProjectHandlers = buildResourceDropdownHandlers('/api/projects', {
-            formatLabel: (proj) => formatProjectLabel(proj, portfolioMap),
-            matcherText: (proj) => `${proj.name} ${proj.code || ''} ${proj.line || ''} ${formatPortfolioLabel(portfolioMap[proj.portfolio_id] || { name: proj.portfolio_id })}`,
-            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label, portfolio_id: raw.portfolio_id ?? null }),
-          });
-          const projectHandlers = {
-            key: 'project',
-            ...baseProjectHandlers,
-            create: async (label) => {
-              const portfolioSelect = content.querySelector('select[name=portfolio_id]');
-              const portfolioValue = portfolioSelect ? Number(portfolioSelect.value) : NaN;
-              if (!portfolioValue || Number.isNaN(portfolioValue)) {
-                alert('Pick a funding source first so the project can be created under it.');
-                return null;
-              }
-              const payload = { name: label, portfolio_id: portfolioValue };
-              const created = await apiCreate('/api/projects', payload);
-              projectOpts.push({ value: created.id, label: formatProjectLabel(created, portfolioMap), raw: created });
-              return { value: created.id, label: formatProjectLabel(created, portfolioMap), raw: created };
-            },
-            edit: async (option, nextLabel) => {
-              const updated = await baseProjectHandlers.edit(option, nextLabel);
-              option.raw = updated.raw;
-              updated.label = formatProjectLabel(updated.raw, portfolioMap);
-              const target = projectOpts.find(opt => String(opt.value) === String(updated.value));
-              if (target) {
-                target.label = updated.label;
-                target.raw = updated.raw;
-              }
-              return updated;
-            },
-          };
-
-          const categoryMap = mapBy(categories);
-          const categoryOpts = categories.map(c => ({ value: c.id, label: catPath(c, categoryMap), raw: c }));
-          const baseCategoryHandlers = buildResourceDropdownHandlers('/api/categories', {
-            formatLabel: (cat) => catPath(cat, { ...categoryMap, [cat.id]: cat }),
-            matcherText: (cat) => catPath(cat, categoryMap),
-            buildUpdateBody: (raw, label) => ({ ...stripId(raw), name: label }),
-          });
-          const categoryHandlers = {
-            key: 'category',
-            ...baseCategoryHandlers,
-            create: async (label) => {
-              const projectSelect = content.querySelector('select[name=project_id]');
-              const projectValue = projectSelect ? Number(projectSelect.value) : NaN;
-              const payload = { name: label, project_id: Number.isNaN(projectValue) ? null : projectValue || null };
-              const created = await apiCreate('/api/categories', payload);
-              categoryMap[created.id] = created;
-              const option = { value: created.id, label: catPath(created, categoryMap), raw: created };
-              categoryOpts.push(option);
-              parentOptions.push({ value: created.id, label: option.label, raw: created });
-              return option;
-            },
-            edit: async (option, nextLabel) => {
-              const updated = await baseCategoryHandlers.edit(option, nextLabel);
-              categoryMap[updated.raw.id] = updated.raw;
-              updated.label = catPath(updated.raw, categoryMap);
-              const catOption = categoryOpts.find(opt => String(opt.value) === String(updated.value));
-              if (catOption) {
-                catOption.label = updated.label;
-                catOption.raw = updated.raw;
-              }
-              const parentOption = parentOptions.find(opt => opt.value === updated.raw.id);
-              if (parentOption) parentOption.label = updated.label;
-              return updated;
-            },
-          };
-
-          const vendorOpts = vendors.map(v => ({ value: v.id, label: v.name, raw: v }));
-          const baseVendorHandlers = buildResourceDropdownHandlers('/api/vendors', {
-            formatLabel: (v) => v.name,
-            matcherFields: ['name'],
-          });
-          const vendorHandlers = { key: 'vendor', ...baseVendorHandlers };
-          const originalVendorCreate = vendorHandlers.create;
-          vendorHandlers.create = async (label) => {
-            const created = await originalVendorCreate(label);
-            if (created && created.value !== undefined) {
-              vendorOpts.push({ value: created.value, label: created.label, raw: created.raw });
-            }
-            return created;
-          };
-          const originalVendorEdit = vendorHandlers.edit;
-          vendorHandlers.edit = async (option, nextLabel) => {
-            const updated = await originalVendorEdit(option, nextLabel);
-            const target = vendorOpts.find(opt => String(opt.value) === String(updated.value));
-            if (target) {
-              target.label = updated.label;
-              target.raw = updated.raw;
-            }
-            return updated;
-          };
-
-          const kindOptions = [
-            { value: 'budget', label: 'budget (sets target)' },
-            { value: 'quote', label: 'quote (informational)' },
-            { value: 'po', label: 'po (actual)' },
-            { value: 'unplanned', label: 'unplanned (actual)' },
-            { value: 'adjustment', label: 'adjustment (actual)' },
-          ];
-
-          content.innerHTML =
-            card('Add Entry', `
-              <div class="row two">
-                <div>
-                  <div class="section">
-                    <div class="title">Basics <span class="hint">(date, kind, amount)</span></div>
-                    <div class="row three">
-                      ${field('date', labelFor('date','Date','Optional (YYYY-MM-DD).'), `<input class="input" type="date" name="date"/>`)}
-                      ${field('kind', labelFor('kind','What are you adding?','Budget sets limits; PO/Unplanned/Adjustment count to actuals; Quote is informational.'), select('kind', kindOptions, { allowCreate: false, allowEdit: false, allowDelete: false, prefill: false }))}
-                      ${field('amount', labelFor('amount','Amount','Positive number; negative for adjustment credits.'), input('amount','1000'))}
-                    </div>
-                  </div>
-
-                  <div class="section">
-                    <div class="title">Scope</div>
-                    <div class="row three">
-                      ${field('portfolio_id', labelFor('portfolio_id','Funding Source','Primary funding source charged.'), select('portfolio_id', portfolioOpts, { ...portfolioHandlers }))}
-                      ${field('project_id', labelFor('project_id','Project','Per funding-source project.'), select('project_id', projectOpts, { ...projectHandlers }))}
-                      ${field('category_id', labelFor('category_id','Category (n-level)','Pick the most specific leaf.'), select('category_id', categoryOpts, { ...categoryHandlers }))}
-                    </div>
-                  </div>
-
-                  <div class="section">
-                    <div class="title">Commercial</div>
-                    <div class="row three">
-                      ${field('vendor_id', labelFor('vendor_id','Vendor','Who provided the quote/PO.'), select('vendor_id', vendorOpts, { ...vendorHandlers }))}
-                      ${field('quote_ref', labelFor('quote_ref','Quote Ref','For quotes.'), input('quote_ref','QT-0097'))}
-                      ${field('po_number', labelFor('po_number','PO #','For POs.'), input('po_number','4500123456'))}
-                    </div>
-                  </div>
-
-                  <div class="section">
-                    <div class="title">Wrong Source? <span class="hint">(flag to fix later)</span></div>
-                    <div class="row two">
-                      <div class="field">
-                        ${labelFor('mischarged','Mark as mischarged','Check to flag this entry as charged to the wrong funding source.')}
-                        <input type="checkbox" name="mischarged"/>
-                      </div>
-                      ${field('intended_portfolio_id', labelFor('intended_portfolio_id','Intended Funding Source','Where it *should* be charged.'), select('intended_portfolio_id', [{ value: '', label: '(none)', raw: null }].concat(portfolioOpts), { ...portfolioHandlers }))}
-                    </div>
-                  </div>
-
-                  <div class="section">
-                    <div class="title">Notes & Tags</div>
-                    <div class="row two">
-                      ${field('description', labelFor('description','Description','Short note.'), `<input class="input" name="description" placeholder="Optional"/>`)}
-                      ${field('tags', labelFor('tags','Tags','Comma-separated (e.g., "long-lead, priority").'), input('tags','long-lead, priority'))}
-                    </div>
-                  </div>
-
-                  <div class="section">
-                    <div class="title">Allocations <span class="hint">(optional)</span> <span class="info" data-tip="Split the amount across multiple funding sources. Sum must equal Amount.">i</span></div>
-                    <div id="allocs"></div>
-                    <button id="addAlloc">+ Allocation</button>
-                  </div>
-
-                  <div class="section">
-                    <button id="addEntry">Add Entry</button>
-                  </div>
-                </div>
-
-                <div>${helpBox('budget')}</div>
-              </div>
-            `)
-            + card('All Entries', table(entries, [
-              { key: 'id', label: 'ID' },
-              { key: 'date', label: 'Date' },
-              { key: 'kind', label: 'Kind' },
-              { key: 'amount', label: 'Amount' },
-              { key: 'portfolio_id', label: 'Funding Source' },
-              { key: 'project_id', label: 'Project' },
-              { key: 'category_id', label: 'Category' },
-              { key: 'vendor_id', label: 'Vendor' },
-              { key: 'po_number', label: 'PO #' },
-              { key: 'quote_ref', label: 'Quote Ref' },
-              { key: 'mischarged', label: 'Mischarged' },
-              { key: 'intended_portfolio_id', label: 'Intended Funding Source' },
-              { key: 'description', label: 'Description' },
-            ], '/api/entries'));
-
-          initializeDropdowns(content);
-          setupTableEditing(content, '/api/entries', entries, {
-            portfolio_id: {
-              type: 'dropdown',
-              options: portfolioOpts,
-              handlers: portfolioHandlers,
-              valueType: 'number',
-            },
-            project_id: {
-              type: 'dropdown',
-              options: projectOpts,
-              handlers: projectHandlers,
-              valueType: 'number',
-              allowNull: true,
-              nullOptionLabel: '(none)',
-            },
-            category_id: {
-              type: 'dropdown',
-              options: categoryOpts,
-              handlers: categoryHandlers,
-              valueType: 'number',
-              allowNull: true,
-              nullOptionLabel: '(none)',
-            },
-            vendor_id: {
-              type: 'dropdown',
-              options: vendorOpts,
-              handlers: vendorHandlers,
-              valueType: 'number',
-              allowNull: true,
-              nullOptionLabel: '(none)',
-            },
-            intended_portfolio_id: {
-              type: 'dropdown',
-              options: portfolioOpts,
-              handlers: portfolioHandlers,
-              valueType: 'number',
-              allowNull: true,
-              nullOptionLabel: '(none)',
-            },
-            mischarged: {
-              render: (value) => {
-                if (value === true || value === 'true' || value === 1 || value === '1') return 'Yes';
-                if (value === false || value === 'false' || value === 0 || value === '0') return '';
-                return value == null ? '' : String(value);
-              },
-            },
-          });
-
-          const misBox = content.querySelector('input[name=mischarged]');
-          const intendedSel = content.querySelector('select[name=intended_portfolio_id]');
-          if (misBox && intendedSel) {
-            const sync = () => { intendedSel.parentElement.parentElement.style.display = misBox.checked ? '' : 'none'; };
-            sync(); misBox.addEventListener('change', sync);
-          }
-
-          if (FEATURES.REALLOCATE) {
-            const catOptionsForDrawer = categoryOpts.map(c => ({ id: c.value, label: c.label }));
-            content.querySelectorAll('.btn-reallocate').forEach(btn => {
-              btn.addEventListener('click', () => {
-                const entryId = Number(btn.dataset.entryId);
-                const entry = entries.find(e => e.id === entryId);
-                if (!entry) return;
-                if (!entry.transaction_id && !entry.id) {
-                  alert('Entry missing transaction reference; cannot reallocate yet.');
-                  return;
-                }
-                openReallocate(entry, fundingSources, catOptionsForDrawer);
-              });
-            });
-          }
-
-          const allocsDiv = document.getElementById('allocs');
-          const addAlloc = document.getElementById('addAlloc');
-          if (addAlloc) addAlloc.onclick = () => {
-            allocsDiv.insertAdjacentHTML('beforeend', `
-              <div class="row four" data-row="1" style="margin-bottom:6px">
-                ${field('alloc_portfolio', labelFor('alloc_portfolio','Funding Source','Destination funding source.'), select('alloc_portfolio', portfolioOpts, { ...portfolioHandlers }))}
-                ${field('alloc_amount', labelFor('alloc_amount','Amount','Portion to this funding source.'), input('alloc_amount',''))}
-                <div class="field"><label>&nbsp;</label><button onclick="this.closest('[data-row]').remove()">Remove</button></div>
-              </div>`);
-            initializeDropdowns(allocsDiv);
-          };
-
-          const kindSel = content.querySelector('select[name=kind]');
-          const markRequired = () => {
-            const k = KIND_HELP[kindSel.value];
-            const box = document.getElementById('kindHelp');
-            if (box) box.outerHTML = helpBox(kindSel.value);
-            content.querySelectorAll('.required').forEach(el => el.classList.remove('required'));
-            ['amount','portfolio_id','vendor_id','quote_ref','po_number'].forEach(name => {
-              const label = content.querySelector(`[for="${name}"]`);
-              if (label) label.classList.remove('required');
-            });
-            k.required.forEach(name => {
-              const label = content.querySelector(`[for="${name}"]`);
-              if (label) label.classList.add('required');
-            });
-          };
-          if (kindSel) kindSel.onchange = markRequired;
-          markRequired();
-
-          const addBtn = document.getElementById('addEntry');
-          if (addBtn) addBtn.onclick = async () => {
-            try {
-              const getField = (name) => {
-                const el = content.querySelector(`[name=${name}]`);
-                if (!el) return null;
-                if (el.type === 'checkbox') return !!el.checked;
-                return el.value === '' ? null : el.value;
-              };
-              const allocations = [...allocsDiv.querySelectorAll('[data-row]')].map(div => ({
-                portfolio_id: Number(div.querySelector('select[name=alloc_portfolio]').value),
-                amount: Number(div.querySelector('input[name=alloc_amount]').value),
-              }));
-
-              const body = {
-                date: getField('date'),
-                kind: String(getField('kind') || 'budget'),
-                amount: Number(getField('amount')),
-                description: getField('description'),
-                portfolio_id: getField('portfolio_id') ? Number(getField('portfolio_id')) : null,
-                project_id: getField('project_id') ? Number(getField('project_id')) : null,
-                category_id: getField('category_id') ? Number(getField('category_id')) : null,
-                vendor_id: getField('vendor_id') ? Number(getField('vendor_id')) : null,
-                po_number: getField('po_number'),
-                quote_ref: getField('quote_ref'),
-                mischarged: getField('mischarged') || false,
-                intended_portfolio_id: getField('intended_portfolio_id') ? Number(getField('intended_portfolio_id')) : null,
-                allocations: allocations.length ? allocations : null,
-                tags: (getField('tags') || '').split(',').map(s => s.trim()).filter(Boolean) || null,
-              };
-
-              const req = KIND_HELP[body.kind].required;
-              const missing = [];
-              req.forEach(name => {
-                const value = body[name];
-                const ok = typeof value === 'number' ? !Number.isNaN(value) : !!value;
-                if (!ok) {
-                  missing.push(name);
-                  const el = content.querySelector(`[name=${name}]`);
-                  if (el) el.classList.add('invalid');
-                }
-              });
-
-              if (missing.length) {
-                alert(`Missing required fields for kind="${body.kind}": ${missing.join(', ')}`);
-                return;
-              }
-
-              if (body.mischarged && !body.intended_portfolio_id) {
-                alert('Please choose the intended funding source for a mischarged entry.');
-                return;
-              }
-
-              if (body.allocations && body.allocations.length) {
-                const sum = body.allocations.reduce((acc, item) => acc + (Number(item.amount) || 0), 0);
-                if (Math.abs(sum - body.amount) > 1e-6) {
-                  alert(`Allocations must sum to Amount (${body.amount}). Current total: ${sum}`);
-                  return;
-                }
-              }
-
-              await apiCreate('/api/entries', body);
-              renderEntries();
-
-            } catch (err) {
-              showError(err);
-            }
-          };
-        }
         async function renderPayments(){
           if (!FEATURES.PAYMENT_SCHEDULES) {
             content.innerHTML = card('Payments', '<p>Payment schedule management is disabled.</p>');
@@ -4376,6 +3067,10 @@
         async function renderActive(){
           const active = document.querySelector('nav button.active');
           const tab = active && active.dataset.tab;
+          if (tab !== 'portfolios' && typeof fundingState.unmountFundingPage === 'function') {
+            try { fundingState.unmountFundingPage(); } catch (err) { console.warn('Failed to unmount funding page', err); }
+            fundingState.unmountFundingPage = null;
+          }
           try {
             if(tab==='portfolios') return renderPortfolios();
             if(tab==='vendors') return renderVendors();
